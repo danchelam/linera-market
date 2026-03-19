@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.4"
+__version__ = "2026.03.19.5"
 
 import asyncio
 import random
@@ -21,6 +21,9 @@ from playwright.async_api import Page, BrowserContext
 from base_module import (
     WalletPopupHandler,
     _click_wallet_button,
+    _find_and_fill_password,
+    _click_unlock_button,
+    OKX_DEFAULT_PASSWORD,
     load_accounts,
     run_batch,
     log,
@@ -491,16 +494,58 @@ async def login(
         else:
             log(account_id, "未检测到 Connect Wallet 按钮（可能已连接）")
 
-        # ── 处理钱包签名弹窗（可能有多个） ──
-        for round_num in range(3):
-            handled = await handle_wallet_popups_manual(
-                context, account_id, timeout=15,
-            )
-            if handled:
-                log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
-                await asyncio.sleep(3)
-            else:
+        # ── 处理钱包弹窗（可能是解锁弹窗或签名弹窗） ──
+        for round_num in range(5):
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    u = p.url or ""
+                except Exception:
+                    continue
+                if "chrome-extension://" in u and "offscreen" not in u:
+                    wallet_page = p
+                    break
+
+            if not wallet_page:
+                if round_num == 0:
+                    # 第一轮没弹窗，多等一下
+                    await asyncio.sleep(5)
+                    continue
                 break
+
+            log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            # 检查是否有密码框（解锁弹窗）
+            has_pwd = False
+            for frame in wallet_page.frames:
+                try:
+                    if await frame.locator('input[type="password"]').count() > 0:
+                        has_pwd = True
+                        break
+                except Exception:
+                    continue
+
+            if has_pwd:
+                log(account_id, "弹窗含密码框，执行解锁...")
+                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                await asyncio.sleep(0.5)
+                await _click_unlock_button(wallet_page, context, account_id)
+                await asyncio.sleep(3)
+                # 解锁后可能出现签名弹窗，继续循环处理
+                log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
+            else:
+                # 普通签名/连接弹窗
+                clicked = await _click_wallet_button(wallet_page, account_id)
+                if clicked:
+                    log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
+                    await asyncio.sleep(3)
+                else:
+                    break
 
         # ── 检测 Select Ethereum network 按钮 ──
         await asyncio.sleep(2)

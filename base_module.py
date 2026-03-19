@@ -28,7 +28,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.19.4"
+__version__ = "2026.03.19.5"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -601,8 +601,33 @@ async def unlock_okx_wallet(
         try:
             await asyncio.wait_for(popup_ready.wait(), timeout=15)
         except asyncio.TimeoutError:
-            log(account_id, "等待钱包弹窗超时（15秒）→ 停止")
-            return False
+            log(account_id, "等待钱包弹窗超时（15秒），再次检查锁定状态...")
+            # 弹窗没出现 → 可能钱包已解锁（personal_sign 静默完成）
+            try:
+                recheck = await page.evaluate("""async () => {
+                    const p = window.okxwallet || window.ethereum;
+                    if (!p) return {known: false};
+                    try {
+                        if (p._metamask && typeof p._metamask.isUnlocked === 'function') {
+                            return {known: true, unlocked: await p._metamask.isUnlocked()};
+                        }
+                    } catch(e) {}
+                    try {
+                        const accs = await p.request({method: 'eth_accounts'});
+                        if (accs && accs.length > 0) return {known: true, unlocked: true};
+                    } catch(e) {}
+                    return {known: false};
+                }""")
+            except Exception:
+                recheck = {"known": False}
+
+            if recheck.get("known") and recheck.get("unlocked"):
+                log(account_id, "钱包确认已解锁（无需弹窗）")
+                return True
+
+            # 仍不确定 → 返回 "NEED_DAPP" 让任务脚本通过网站触发解锁
+            log(account_id, "钱包状态不确定，将通过 dApp 触发解锁")
+            return "NEED_DAPP"
 
         # ── 7. 弹窗已出现，等待 React 渲染出表单元素 ──
         wp = wallet_popup
@@ -917,13 +942,15 @@ async def run_single_account(
         unlock_ok = await unlock_okx_wallet(context, aid)
         handler.enabled = True
 
-        if not unlock_ok:
+        if unlock_ok == "NEED_DAPP":
+            log(aid, "钱包将通过 dApp 页面解锁")
+        elif not unlock_ok:
             log(aid, "★ 钱包解锁失败，停止执行。浏览器保持打开，请手动检查。")
             log(aid, "★ 检查完毕后按 Ctrl+C 退出脚本，然后在 AdsPower 中手动关闭窗口。")
             browser = None  # 阻止 finally 关闭浏览器
             return
-
-        log(aid, "钱包解锁成功")
+        else:
+            log(aid, "钱包解锁成功")
 
         # 清理残留弹窗
         await drain_existing_popups(context, aid, page)
