@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.9"
+__version__ = "2026.03.20.1"
 
 import asyncio
 import random
@@ -167,23 +167,22 @@ async def recover_from_stuck(
 #  工具：下注成功标志
 # ════════════════════════════════════════════════════════
 
-async def check_bet_success(page: Page) -> bool:
+async def get_card_glass_count(page: Page) -> int:
+    """获取当前页面上 card-glass 的数量"""
+    try:
+        return await page.locator("div.card-glass").count()
+    except Exception:
+        return 0
+
+
+async def check_bet_success(page: Page, baseline_count: int = 0) -> bool:
     """
-    检测下注成功标志：页面出现 div.card-glass 中包含乘数（x1.78 / x2.07 等）。
-    成功时有两个 card-glass（HIGHER 和 LOWER 各一个），内含 bet-arrow-icon。
+    检测下注成功：card-glass 数量比 baseline 增加。
+    baseline 是点击下注按钮前记录的数量，避免误判旧卡片。
     """
     try:
-        cards = page.locator("div.card-glass")
-        if await cards.count() == 0:
-            return False
-        # 检查 card 内是否包含乘数文本 (xN.NN)
-        multiplier = page.locator("div.card-glass span[class*='text-danger'], div.card-glass span[class*='text-success']")
-        if await multiplier.count() > 0:
-            text = await multiplier.first.inner_text(timeout=2000)
-            if text.strip().startswith("x"):
-                return True
-        # 兜底：检查 bet-arrow-icon 存在
-        if await page.locator("div.bet-arrow-icon, div.bet-arrow-icon-danger").count() > 0:
+        current = await page.locator("div.card-glass").count()
+        if current > baseline_count:
             return True
     except Exception:
         pass
@@ -662,8 +661,15 @@ async def login(
             log(account_id, "市场切换后的钱包弹窗已处理")
             await asyncio.sleep(2)
 
-        # 设置下注金额
-        await set_bet_amount(page, account_id, bet_amount)
+        # 设置下注金额（最多重试 3 次）
+        for amt_try in range(3):
+            if await set_bet_amount(page, account_id, bet_amount):
+                break
+            if amt_try < 2:
+                log(account_id, f"金额设置失败，重试 ({amt_try+1}/3)...")
+                await asyncio.sleep(2)
+            else:
+                log(account_id, "金额设置多次失败，使用默认金额继续")
 
         # 验证按钮可用
         for i in range(10):
@@ -745,7 +751,10 @@ async def place_single_bet(
             return False
         await asyncio.sleep(1)
 
-    # 4. 随机方向并点击
+    # 4. 记录当前 card-glass 数量（下注前基线）
+    baseline = await get_card_glass_count(page)
+
+    # 5. 随机方向并点击
     direction = random.choice(["HIGHER", "LOWER"])
     btn_cls = "btn-higher" if direction == "HIGHER" else "btn-lower"
     try:
@@ -755,14 +764,13 @@ async def place_single_bet(
         log(account_id, f"点击 {direction} 失败: {e}")
         return False
 
-    # 5. 等待成功标志（后台 handler 会自动处理钱包弹窗）
-    #    不再手动抢弹窗，避免和后台 handler 冲突
+    # 6. 等待成功标志：card-glass 数量 > baseline
     log(account_id, f"[{bet_number}/{target_bets}] 等待钱包自动签名 + 成功标志...")
     success = False
     for i in range(60):
         if STOP_FLAG:
             return False
-        if await check_bet_success(page):
+        if await check_bet_success(page, baseline):
             success = True
             break
         await asyncio.sleep(1)
@@ -837,22 +845,11 @@ async def run_betting_loop(
 
 
 # ════════════════════════════════════════════════════════
-#  上传交易记录
+#  Leaderboard Trades 总数读取
 # ════════════════════════════════════════════════════════
 
-async def upload_trades(
-    page: Page, context: BrowserContext, account_id: str,
-) -> bool:
-    """
-    下注完成后上传交易：
-    1. 点击菜单按钮（三横线图标）
-    2. 点击 Leaderboard 链接
-    3. 等待 Upload Trades 按钮出现并点击
-    4. 处理签名弹窗
-    """
-    log(account_id, "开始上传交易记录...")
-
-    # 1. 点击菜单按钮（lucide-menu 图标）
+async def navigate_to_leaderboard(page: Page, account_id: str) -> bool:
+    """从市场页面导航到 Leaderboard"""
     try:
         menu_btn = page.locator("button:has(svg.lucide-menu)")
         if await menu_btn.count() == 0:
@@ -868,18 +865,17 @@ async def upload_trades(
         log(account_id, f"点击菜单按钮失败: {e}")
         return False
 
-    # 2. 点击 Leaderboard 链接
     try:
         lb_link = page.locator("a[href*='/leaderboard']")
         if await lb_link.count() == 0:
             lb_link = page.locator("a:has(svg.lucide-trophy)")
         if await lb_link.count() == 0:
             lb_link = page.locator("a:has-text('Leaderboard')")
-
         if await lb_link.count() > 0:
             await lb_link.first.click(timeout=5000)
             log(account_id, "已点击 Leaderboard")
             await asyncio.sleep(3)
+            return True
         else:
             log(account_id, "未找到 Leaderboard 链接")
             return False
@@ -887,7 +883,52 @@ async def upload_trades(
         log(account_id, f"点击 Leaderboard 失败: {e}")
         return False
 
-    # 3. 等待 Upload Trades 按钮出现
+
+async def get_trades_count(page: Page, account_id: str) -> int:
+    """读取 Leaderboard 页面上 Trades 后面的数字"""
+    try:
+        trades_span = page.locator("span:has-text('Trades') >> span.font-semibold")
+        for _ in range(10):
+            if await trades_span.count() > 0:
+                text = (await trades_span.first.inner_text(timeout=3000)).strip()
+                if text.isdigit():
+                    count = int(text)
+                    log(account_id, f"当前 Trades 总数: {count}")
+                    return count
+            await asyncio.sleep(1)
+    except Exception as e:
+        log(account_id, f"读取 Trades 数量失败: {e}")
+    return -1
+
+
+async def navigate_back_to_market(page: Page, account_id: str) -> bool:
+    """从 Leaderboard 返回市场页面"""
+    market = random.choice(MARKETS)
+    url = f"{DAPP_URL}/?market={market}"
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(5)
+        log(account_id, "已返回市场页面")
+        return True
+    except Exception as e:
+        log(account_id, f"返回市场页面失败: {e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════
+#  上传交易记录
+# ════════════════════════════════════════════════════════
+
+async def upload_trades(
+    page: Page, context: BrowserContext, account_id: str,
+) -> bool:
+    """导航到 Leaderboard → 点击 Upload Trades → 签名确认"""
+    log(account_id, "开始上传交易记录...")
+
+    if not await navigate_to_leaderboard(page, account_id):
+        return False
+
+    # 等待 Upload Trades 按钮出现
     upload_btn = page.locator("button:has-text('Upload Trades')")
     for _ in range(30):
         if await upload_btn.count() > 0:
@@ -897,7 +938,7 @@ async def upload_trades(
         log(account_id, "Upload Trades 按钮未出现")
         return False
 
-    # 4. 点击 Upload Trades
+    # 点击 Upload Trades
     try:
         await upload_btn.first.click(timeout=5000)
         log(account_id, "已点击 Upload Trades")
@@ -906,11 +947,10 @@ async def upload_trades(
         log(account_id, f"点击 Upload Trades 失败: {e}")
         return False
 
-    # 5. 处理签名弹窗（由后台 handler 自动处理）
+    # 处理签名弹窗（由后台 handler 自动处理）
     log(account_id, "等待上传签名确认...")
     await asyncio.sleep(10)
 
-    # 检查是否上传成功（按钮消失或文案变化）
     await asyncio.sleep(3)
     if await upload_btn.count() == 0 or await page.locator("text=Upload Trades").count() == 0:
         log(account_id, "交易记录上传成功")
@@ -938,14 +978,61 @@ async def linera_task(
         log(account_id, "登录失败")
         return False
 
+    # ── 下注前读取 Trades 基线 ──
+    initial_trades = -1
+    if await navigate_to_leaderboard(page, account_id):
+        initial_trades = await get_trades_count(page, account_id)
+        await navigate_back_to_market(page, account_id)
+        await select_1_minute(page, account_id)
+        await asyncio.sleep(2)
+
+    if initial_trades >= 0:
+        log(account_id, f"下注前 Trades: {initial_trades}，目标: {initial_trades + target_bets}")
+
+    # ── 第一轮下注 ──
     bet_ok = await run_betting_loop(
         page, context, account_id, popup_handler, target_bets, bet_amount,
     )
 
-    if bet_ok:
-        await upload_trades(page, context, account_id)
+    if not bet_ok:
+        return False
 
-    return bet_ok
+    # ── 上传并校验 ──
+    await upload_trades(page, context, account_id)
+
+    # 校验 Trades 数量（最多补跑 2 轮）
+    if initial_trades >= 0:
+        target_total = initial_trades + target_bets
+        for verify_round in range(2):
+            await asyncio.sleep(3)
+            final_trades = await get_trades_count(page, account_id)
+            if final_trades < 0:
+                log(account_id, "无法读取最终 Trades 数量，跳过校验")
+                break
+
+            shortfall = target_total - final_trades
+            if shortfall <= 0:
+                log(account_id, f"Trades 校验通过: {final_trades} >= {target_total}")
+                break
+
+            log(account_id, f"Trades 不足: {final_trades}/{target_total}，还差 {shortfall} 次，补跑中...")
+            # 返回市场补跑
+            if not await navigate_back_to_market(page, account_id):
+                break
+            await select_1_minute(page, account_id)
+            await asyncio.sleep(2)
+
+            extra_ok = await run_betting_loop(
+                page, context, account_id, popup_handler, shortfall, bet_amount,
+            )
+            if not extra_ok:
+                log(account_id, "补跑失败")
+                break
+
+            # 再次上传
+            await upload_trades(page, context, account_id)
+
+    return True
 
 
 # ════════════════════════════════════════════════════════
