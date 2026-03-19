@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.20.1"
+__version__ = "2026.03.20.2"
 
 import asyncio
 import random
@@ -332,43 +332,56 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
 # ════════════════════════════════════════════════════════
 
 async def set_bet_amount(page: Page, account_id: str, amount: str) -> bool:
-    # 点击金额按钮（包含 Currency 图标的圆形按钮）
+    # 点击金额按钮 — 多种方式尝试
+    clicked = False
+
+    # 方法1: Playwright 点击包含 Currency 图标的区域
     try:
-        ok = await page.evaluate("""() => {
-            // 找包含 Currency 图标的按钮区域
-            const img = document.querySelector('img[alt="Currency"]');
-            if (img) {
-                let el = img.parentElement;
-                for (let i = 0; i < 3; i++) {
-                    if (!el) break;
-                    if (el.tagName === 'BUTTON' || getComputedStyle(el).cursor === 'pointer') {
-                        el.click();
-                        return true;
-                    }
+        currency_img = page.locator("img[alt='Currency']")
+        if await currency_img.count() > 0:
+            parent = currency_img.locator("..")
+            await parent.first.click(timeout=3000)
+            clicked = True
+            log(account_id, "已点击金额按钮 (Currency 父元素)")
+    except Exception:
+        pass
+
+    # 方法2: 点击金额显示文本（通常在 HIGHER/LOWER 按钮上方）
+    if not clicked:
+        try:
+            amt_display = page.locator("div.rounded-full:has(img[alt='Currency'])")
+            if await amt_display.count() > 0:
+                await amt_display.first.click(timeout=3000)
+                clicked = True
+                log(account_id, "已点击金额按钮 (rounded-full)")
+        except Exception:
+            pass
+
+    # 方法3: JS 强制点击 + dispatchEvent
+    if not clicked:
+        try:
+            ok = await page.evaluate("""() => {
+                const img = document.querySelector('img[alt="Currency"]');
+                if (!img) return false;
+                let el = img.closest('[role="button"]') || img.parentElement;
+                for (let i = 0; i < 5 && el; i++) {
+                    el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                    if (el.tagName === 'BUTTON') break;
                     el = el.parentElement;
                 }
-                img.parentElement.click();
                 return true;
-            }
-            // 兜底：找 rounded-full 且包含 img 的 div
-            const divs = document.querySelectorAll('div.rounded-full');
-            for (const d of divs) {
-                if (d.querySelector('img')) {
-                    d.click();
-                    return true;
-                }
-            }
-            return false;
-        }""")
-        if ok:
-            log(account_id, "已点击金额按钮")
-            await asyncio.sleep(1.5)
-        else:
-            log(account_id, "未找到金额按钮")
-            return False
-    except Exception as e:
-        log(account_id, f"点击金额按钮失败: {e}")
+            }""")
+            if ok:
+                clicked = True
+                log(account_id, "已点击金额按钮 (JS dispatchEvent)")
+        except Exception:
+            pass
+
+    if not clicked:
+        log(account_id, "未找到金额按钮")
         return False
+
+    await asyncio.sleep(1.5)
 
     # 等待输入框出现
     input_loc = page.locator("input[inputmode='decimal']")
@@ -848,8 +861,8 @@ async def run_betting_loop(
 #  Leaderboard Trades 总数读取
 # ════════════════════════════════════════════════════════
 
-async def navigate_to_leaderboard(page: Page, account_id: str) -> bool:
-    """从市场页面导航到 Leaderboard"""
+async def click_menu_button(page: Page, account_id: str) -> bool:
+    """点击菜单按钮（三横线图标）"""
     try:
         menu_btn = page.locator("button:has(svg.lucide-menu)")
         if await menu_btn.count() == 0:
@@ -858,6 +871,7 @@ async def navigate_to_leaderboard(page: Page, account_id: str) -> bool:
             await menu_btn.first.click(timeout=5000)
             log(account_id, "已点击菜单按钮")
             await asyncio.sleep(1.5)
+            return True
         else:
             log(account_id, "未找到菜单按钮")
             return False
@@ -865,22 +879,28 @@ async def navigate_to_leaderboard(page: Page, account_id: str) -> bool:
         log(account_id, f"点击菜单按钮失败: {e}")
         return False
 
+
+async def navigate_to_history(page: Page, account_id: str) -> bool:
+    """从市场页面导航到 History 页面"""
+    if not await click_menu_button(page, account_id):
+        return False
+
     try:
-        lb_link = page.locator("a[href*='/leaderboard']")
-        if await lb_link.count() == 0:
-            lb_link = page.locator("a:has(svg.lucide-trophy)")
-        if await lb_link.count() == 0:
-            lb_link = page.locator("a:has-text('Leaderboard')")
-        if await lb_link.count() > 0:
-            await lb_link.first.click(timeout=5000)
-            log(account_id, "已点击 Leaderboard")
+        hist_link = page.locator("a[href*='/history']")
+        if await hist_link.count() == 0:
+            hist_link = page.locator("a:has(svg.lucide-clock)")
+        if await hist_link.count() == 0:
+            hist_link = page.locator("a:has-text('History')")
+        if await hist_link.count() > 0:
+            await hist_link.first.click(timeout=5000)
+            log(account_id, "已点击 History")
             await asyncio.sleep(3)
             return True
         else:
-            log(account_id, "未找到 Leaderboard 链接")
+            log(account_id, "未找到 History 链接")
             return False
     except Exception as e:
-        log(account_id, f"点击 Leaderboard 失败: {e}")
+        log(account_id, f"点击 History 失败: {e}")
         return False
 
 
@@ -925,7 +945,24 @@ async def upload_trades(
     """导航到 Leaderboard → 点击 Upload Trades → 签名确认"""
     log(account_id, "开始上传交易记录...")
 
-    if not await navigate_to_leaderboard(page, account_id):
+    if not await click_menu_button(page, account_id):
+        return False
+
+    try:
+        lb_link = page.locator("a[href*='/leaderboard']")
+        if await lb_link.count() == 0:
+            lb_link = page.locator("a:has(svg.lucide-trophy)")
+        if await lb_link.count() == 0:
+            lb_link = page.locator("a:has-text('Leaderboard')")
+        if await lb_link.count() > 0:
+            await lb_link.first.click(timeout=5000)
+            log(account_id, "已点击 Leaderboard")
+            await asyncio.sleep(3)
+        else:
+            log(account_id, "未找到 Leaderboard 链接")
+            return False
+    except Exception as e:
+        log(account_id, f"点击 Leaderboard 失败: {e}")
         return False
 
     # 等待 Upload Trades 按钮出现
@@ -978,9 +1015,9 @@ async def linera_task(
         log(account_id, "登录失败")
         return False
 
-    # ── 下注前读取 Trades 基线 ──
+    # ── 下注前读取 Trades 基线（通过 History 页面） ──
     initial_trades = -1
-    if await navigate_to_leaderboard(page, account_id):
+    if await navigate_to_history(page, account_id):
         initial_trades = await get_trades_count(page, account_id)
         await navigate_back_to_market(page, account_id)
         await select_1_minute(page, account_id)
@@ -1000,10 +1037,14 @@ async def linera_task(
     # ── 上传并校验 ──
     await upload_trades(page, context, account_id)
 
-    # 校验 Trades 数量（最多补跑 2 轮）
+    # 校验 Trades 数量（通过 History 页面，最多补跑 2 轮）
     if initial_trades >= 0:
         target_total = initial_trades + target_bets
         for verify_round in range(2):
+            # 导航到 History 读取最终数量
+            if not await navigate_to_history(page, account_id):
+                log(account_id, "无法导航到 History，跳过校验")
+                break
             await asyncio.sleep(3)
             final_trades = await get_trades_count(page, account_id)
             if final_trades < 0:
@@ -1016,7 +1057,6 @@ async def linera_task(
                 break
 
             log(account_id, f"Trades 不足: {final_trades}/{target_total}，还差 {shortfall} 次，补跑中...")
-            # 返回市场补跑
             if not await navigate_back_to_market(page, account_id):
                 break
             await select_1_minute(page, account_id)
