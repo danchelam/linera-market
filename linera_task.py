@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.7"
+__version__ = "2026.03.19.8"
 
 import asyncio
 import random
@@ -581,8 +581,16 @@ async def login(
         except Exception as e:
             log(account_id, f"Select Network 处理异常: {e}")
 
-        # ── 处理所有剩余钱包弹窗（网络确认 + 签名等） ──
-        for round_num in range(8):
+        # ── 处理剩余弹窗 + 等待 Claiming chain（同时进行） ──
+        # 弹窗可能在 Claiming chain 期间才弹出，所以需要边等边处理
+        await asyncio.sleep(2)
+        claiming_sel = "span:text-is('Claiming chain...')"
+        claiming_loc = page.locator(claiming_sel)
+        popup_count = 0
+        claiming_logged = False
+
+        for tick in range(90):
+            # 先检查有没有钱包弹窗需要处理
             wallet_page = None
             for p in context.pages:
                 try:
@@ -593,40 +601,56 @@ async def login(
                     wallet_page = p
                     break
 
-            if not wallet_page:
-                if round_num == 0:
-                    await asyncio.sleep(3)
-                    continue
-                break
+            if wallet_page:
+                popup_count += 1
+                log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
+                try:
+                    await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
 
-            log(account_id, f"发现剩余钱包弹窗: {wallet_page.url[-60:]}")
-            try:
-                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
+                # 检查是否是解锁弹窗
+                has_pwd = False
+                for frame in wallet_page.frames:
+                    try:
+                        if await frame.locator('input[type="password"]').count() > 0:
+                            has_pwd = True
+                            break
+                    except Exception:
+                        continue
 
-            clicked = await _click_wallet_button(wallet_page, account_id)
-            if clicked:
-                log(account_id, f"剩余弹窗已处理（第 {round_num+1} 轮）")
+                if has_pwd:
+                    log(account_id, "弹窗含密码框，执行解锁...")
+                    await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                    await asyncio.sleep(0.5)
+                    await _click_unlock_button(wallet_page, context, account_id)
+                else:
+                    await _click_wallet_button(wallet_page, account_id)
+
+                log(account_id, f"弹窗已处理（第 {popup_count} 个）")
                 await asyncio.sleep(3)
-            else:
-                break
+                continue
 
-        # ── 所有弹窗处理完毕，检测 Claiming chain... spinner ──
-        await asyncio.sleep(3)
-        claiming_sel = "span:text-is('Claiming chain...')"
-        claiming_loc = page.locator(claiming_sel)
-        if await claiming_loc.count() > 0:
-            log(account_id, "检测到 Claiming chain...，等待完成")
-            for _ in range(90):
-                if await claiming_loc.count() == 0:
-                    log(account_id, "Claiming chain 完成")
-                    break
+            # 没有弹窗，检查 Claiming chain
+            if await claiming_loc.count() > 0:
+                if not claiming_logged:
+                    log(account_id, "检测到 Claiming chain...，等待完成")
+                    claiming_logged = True
                 await asyncio.sleep(1)
-            else:
+                continue
+
+            # 没弹窗也没 Claiming chain → 登录完成
+            if tick > 3:
+                if claiming_logged:
+                    log(account_id, "Claiming chain 完成")
+                break
+            await asyncio.sleep(1)
+        else:
+            if claiming_logged:
                 log(account_id, "Claiming chain 等待超时，继续执行")
-            await asyncio.sleep(2)
+
+        await asyncio.sleep(2)
 
         # 选择 1 minute 市场
         await select_1_minute(page, account_id)
