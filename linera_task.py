@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.5"
+__version__ = "2026.03.19.6"
 
 import asyncio
 import random
@@ -555,28 +555,50 @@ async def login(
                 await net_btn.first.click(timeout=5000)
                 log(account_id, "已点击 Select Ethereum network")
                 await asyncio.sleep(3)
-                # 点击后可能再触发钱包弹窗
-                for rn in range(2):
-                    h = await handle_wallet_popups_manual(
-                        context, account_id, timeout=10,
-                    )
-                    if h:
-                        log(account_id, f"网络选择后弹窗已处理（第 {rn+1} 轮）")
-                        await asyncio.sleep(3)
-                    else:
-                        break
             else:
                 log(account_id, "未检测到 Select Network 按钮，跳过")
         except Exception as e:
             log(account_id, f"Select Network 处理异常: {e}")
 
-        # 等待页面稳定 + Claiming chain... spinner
+        # ── 处理所有剩余钱包弹窗（网络确认 + 签名等） ──
+        for round_num in range(8):
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    u = p.url or ""
+                except Exception:
+                    continue
+                if "chrome-extension://" in u and "offscreen" not in u:
+                    wallet_page = p
+                    break
+
+            if not wallet_page:
+                if round_num == 0:
+                    await asyncio.sleep(3)
+                    continue
+                break
+
+            log(account_id, f"发现剩余钱包弹窗: {wallet_page.url[-60:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            clicked = await _click_wallet_button(wallet_page, account_id)
+            if clicked:
+                log(account_id, f"剩余弹窗已处理（第 {round_num+1} 轮）")
+                await asyncio.sleep(3)
+            else:
+                break
+
+        # ── 所有弹窗处理完毕，检测 Claiming chain... spinner ──
         await asyncio.sleep(3)
         claiming_sel = "span:text-is('Claiming chain...')"
         claiming_loc = page.locator(claiming_sel)
         if await claiming_loc.count() > 0:
             log(account_id, "检测到 Claiming chain...，等待完成")
-            for _ in range(60):
+            for _ in range(90):
                 if await claiming_loc.count() == 0:
                     log(account_id, "Claiming chain 完成")
                     break

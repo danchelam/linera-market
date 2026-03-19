@@ -28,7 +28,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.19.5"
+__version__ = "2026.03.19.6"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -936,21 +936,6 @@ async def run_single_account(
             page = await context.new_page()
 
         handler = setup_wallet_handler(context, aid)
-
-        # 解锁钱包（期间禁用弹窗处理器避免冲突）
-        handler.enabled = False
-        unlock_ok = await unlock_okx_wallet(context, aid)
-        handler.enabled = True
-
-        if unlock_ok == "NEED_DAPP":
-            log(aid, "钱包将通过 dApp 页面解锁")
-        elif not unlock_ok:
-            log(aid, "★ 钱包解锁失败，停止执行。浏览器保持打开，请手动检查。")
-            log(aid, "★ 检查完毕后按 Ctrl+C 退出脚本，然后在 AdsPower 中手动关闭窗口。")
-            browser = None  # 阻止 finally 关闭浏览器
-            return
-        else:
-            log(aid, "钱包解锁成功")
 
         # 清理残留弹窗
         await drain_existing_popups(context, aid, page)
