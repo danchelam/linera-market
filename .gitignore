@@ -1,0 +1,16 @@
+# 不上传到 GitHub 的文件
+*.exe
+*.bak
+*.har
+*.xlsx
+*.spec
+__pycache__/
+build/
+dist/
+completed_tasks.json
+templates/
+linera_runner.py
+build.py
+publish.py
+analyze_har*.py
+decode_responses.py
