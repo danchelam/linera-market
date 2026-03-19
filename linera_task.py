@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.2"
+__version__ = "2026.03.19.4"
 
 import asyncio
 import random
@@ -242,34 +242,44 @@ async def get_pool_balance(page: Page) -> str:
 #  选择 1 minute 市场
 # ════════════════════════════════════════════════════════
 
-async def select_1_minute(page: Page, account_id: str) -> bool:
-    await asyncio.sleep(1)
-    try:
-        btn = page.locator("button:text-is('1 minute')")
-        if await btn.count() > 0:
-            await btn.first.click(timeout=5000)
-            log(account_id, "已选择 1 minute 市场")
-            await asyncio.sleep(2)
-            return True
-    except Exception:
-        pass
-    try:
-        ok = await page.evaluate("""() => {
-            for (const btn of document.querySelectorAll('button')) {
-                if (btn.textContent.trim() === '1 minute') {
-                    btn.click();
-                    return true;
+async def select_1_minute(page: Page, account_id: str, max_wait: int = 15) -> bool:
+    """选择 1 minute 市场，等待按钮加载最多 max_wait 秒"""
+    btn_loc = page.locator("button:text-is('1 minute')")
+
+    for attempt in range(max_wait):
+        try:
+            if await btn_loc.count() > 0:
+                await btn_loc.first.click(timeout=5000)
+                log(account_id, "已选择 1 minute 市场")
+                await asyncio.sleep(2)
+                return True
+        except Exception:
+            pass
+
+        # JS 兜底
+        try:
+            ok = await page.evaluate("""() => {
+                for (const btn of document.querySelectorAll('button')) {
+                    if (btn.textContent.trim() === '1 minute') {
+                        btn.click();
+                        return true;
+                    }
                 }
-            }
-            return false;
-        }""")
-        if ok:
-            log(account_id, "已选择 1 minute 市场 (JS)")
-            await asyncio.sleep(2)
-            return True
-    except Exception:
-        pass
-    log(account_id, "未找到 1 minute 按钮")
+                return false;
+            }""")
+            if ok:
+                log(account_id, "已选择 1 minute 市场 (JS)")
+                await asyncio.sleep(2)
+                return True
+        except Exception:
+            pass
+
+        if attempt < max_wait - 1:
+            if attempt == 0:
+                log(account_id, "1 minute 按钮未加载，等待中...")
+            await asyncio.sleep(1)
+
+    log(account_id, "1 minute 按钮等待超时")
     return False
 
 
@@ -289,8 +299,30 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
     except Exception as e:
         log(account_id, f"切换到 {market} 失败: {e}")
         return False
-    await select_1_minute(page, account_id)
-    return True
+    ok = await select_1_minute(page, account_id)
+    if not ok:
+        # 1 minute 按钮加载失败，尝试切到另一个市场再回来
+        other = [m for m in MARKETS if m != market]
+        if other:
+            alt = random.choice(other)
+            log(account_id, f"1 minute 不可用，先切到 {alt} 再切回 {market}")
+            try:
+                alt_tab = page.locator(f"img[alt='{alt} icon']")
+                if await alt_tab.count() > 0:
+                    await alt_tab.first.click(timeout=5000)
+                else:
+                    await page.locator(f"text={alt}").first.click(timeout=5000)
+                await asyncio.sleep(2)
+                tab2 = page.locator(f"img[alt='{market} icon']")
+                if await tab2.count() > 0:
+                    await tab2.first.click(timeout=5000)
+                else:
+                    await page.locator(f"text={market}").first.click(timeout=5000)
+                await asyncio.sleep(2)
+            except Exception:
+                pass
+            ok = await select_1_minute(page, account_id)
+    return ok
 
 
 # ════════════════════════════════════════════════════════
@@ -493,8 +525,20 @@ async def login(
         except Exception as e:
             log(account_id, f"Select Network 处理异常: {e}")
 
-        # 等待页面稳定
+        # 等待页面稳定 + Claiming chain... spinner
         await asyncio.sleep(3)
+        claiming_sel = "span:text-is('Claiming chain...')"
+        claiming_loc = page.locator(claiming_sel)
+        if await claiming_loc.count() > 0:
+            log(account_id, "检测到 Claiming chain...，等待完成")
+            for _ in range(60):
+                if await claiming_loc.count() == 0:
+                    log(account_id, "Claiming chain 完成")
+                    break
+                await asyncio.sleep(1)
+            else:
+                log(account_id, "Claiming chain 等待超时，继续执行")
+            await asyncio.sleep(2)
 
         # 选择 1 minute 市场
         await select_1_minute(page, account_id)
