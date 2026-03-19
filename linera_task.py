@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.19.6"
+__version__ = "2026.03.19.7"
 
 import asyncio
 import random
@@ -464,16 +464,23 @@ async def login(
         log(account_id, "页面已打开，等待加载...")
         await asyncio.sleep(8)
 
-        # ── 检测是否需要 Connect Wallet ──
-        connect_btn = page.locator("button:has-text('Connect Wallet')")
-        if await connect_btn.count() > 0:
-            log(account_id, "检测到 Connect Wallet 按钮，未登录，开始连接...")
+        # ── 检测是否需要 Connect Wallet（带重试） ──
+        okx_selected = False
+        for connect_try in range(3):
+            connect_btn = page.locator("button:has-text('Connect Wallet')")
+            if await connect_btn.count() == 0:
+                if connect_try == 0:
+                    log(account_id, "未检测到 Connect Wallet 按钮（可能已连接）")
+                okx_selected = True
+                break
+
+            log(account_id, f"检测到 Connect Wallet 按钮，开始连接...（第 {connect_try+1} 次）")
             await connect_btn.first.click(timeout=5000)
             await asyncio.sleep(2)
 
-            # 在弹出的钱包列表中选择 OKX Wallet
+            # 等待 OKX Wallet 选项加载（最多 10 秒）
             okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
-            for _ in range(10):
+            for _ in range(20):
                 if await okx_option.count() > 0:
                     break
                 await asyncio.sleep(0.5)
@@ -482,17 +489,31 @@ async def login(
                 await okx_option.first.click(timeout=5000)
                 log(account_id, "已选择 OKX Wallet")
                 await asyncio.sleep(3)
-            else:
-                # 兜底：尝试文本匹配
-                okx_text = page.locator("text=OKX Wallet")
-                if await okx_text.count() > 0:
-                    await okx_text.first.click(timeout=5000)
-                    log(account_id, "已选择 OKX Wallet (文本匹配)")
-                    await asyncio.sleep(3)
-                else:
-                    log(account_id, "未找到 OKX Wallet 选项")
-        else:
-            log(account_id, "未检测到 Connect Wallet 按钮（可能已连接）")
+                okx_selected = True
+                break
+
+            # 文本匹配兜底
+            okx_text = page.locator("text=OKX Wallet")
+            if await okx_text.count() > 0:
+                await okx_text.first.click(timeout=5000)
+                log(account_id, "已选择 OKX Wallet (文本匹配)")
+                await asyncio.sleep(3)
+                okx_selected = True
+                break
+
+            # 没找到 → 关闭弹窗，刷新页面重试
+            log(account_id, "OKX Wallet 未加载，刷新页面重试...")
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(1)
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        if not okx_selected:
+            log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
+            return False
 
         # ── 处理钱包弹窗（可能是解锁弹窗或签名弹窗） ──
         for round_num in range(5):
