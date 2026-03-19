@@ -112,6 +112,55 @@ async def wait_settlement_done(page: Page, account_id: str, timeout: int = 120):
 
 
 # ════════════════════════════════════════════════════════
+#  工具：页面卡住检测
+# ════════════════════════════════════════════════════════
+
+async def is_page_stuck(page: Page) -> bool:
+    """
+    检测页面是否卡住。正常页面应包含：
+    - canvas（价格图表）
+    - svg.lucide-flag（旗帜图标）
+    如果都不存在，说明页面卡住了。
+    """
+    try:
+        has_canvas = await page.locator("canvas").count() > 0
+        has_flag = await page.locator("svg.lucide-flag").count() > 0
+        return not has_canvas and not has_flag
+    except Exception:
+        return True
+
+
+async def recover_from_stuck(
+    page: Page, account_id: str, current_market: str = "",
+) -> bool:
+    """切换到其他市场来恢复卡住的页面，最多尝试所有市场"""
+    log(account_id, "页面卡住，尝试切换市场恢复...")
+    candidates = [m for m in MARKETS if m != current_market]
+    random.shuffle(candidates)
+    if current_market:
+        candidates.append(current_market)
+
+    for m in candidates:
+        await switch_market(page, account_id, m)
+        await asyncio.sleep(3)
+        if not await is_page_stuck(page):
+            log(account_id, f"切换到 {m} 后页面恢复正常")
+            return True
+
+    log(account_id, "所有市场均卡住，尝试刷新页面...")
+    try:
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(5)
+        if not await is_page_stuck(page):
+            log(account_id, "刷新后页面恢复正常")
+            return True
+    except Exception:
+        pass
+    log(account_id, "页面无法恢复")
+    return False
+
+
+# ════════════════════════════════════════════════════════
 #  工具：下注成功标志
 # ════════════════════════════════════════════════════════
 
@@ -492,12 +541,20 @@ async def place_single_bet(
 ) -> bool:
     """
     单次下注流程：
+    0. 检测页面是否卡住 → 卡住则切换市场恢复
     1. 检查池子 → 切换市场(+1min)
     2. 等结算完成
     3. 点击 HIGHER/LOWER
     4. 后台 WalletPopupHandler 自动处理签名
     5. 等待成功标志确认
     """
+
+    # 0. 检测页面是否卡住
+    if await is_page_stuck(page):
+        recovered = await recover_from_stuck(page, account_id)
+        if not recovered:
+            return False
+        await select_1_minute(page, account_id)
 
     # 1. 检查池子余额
     balance = await get_pool_balance(page)
