@@ -28,7 +28,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.20.2"
+__version__ = "2026.03.20.3"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）

@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.20.2"
+__version__ = "2026.03.20.3"
 
 import asyncio
 import random
@@ -939,10 +939,24 @@ async def navigate_back_to_market(page: Page, account_id: str) -> bool:
 #  上传交易记录
 # ════════════════════════════════════════════════════════
 
+async def _wait_wallet_and_confirm(page: Page, context: BrowserContext, account_id: str, action: str, timeout: int = 30) -> bool:
+    """等待钱包弹窗被后台 handler 自动处理，最多等 timeout 秒"""
+    log(account_id, f"等待 {action} 签名确认...")
+    no_action = page.locator("button:has-text('No Actions Needed')")
+    for _ in range(timeout):
+        if await no_action.count() > 0:
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
 async def upload_trades(
     page: Page, context: BrowserContext, account_id: str,
 ) -> bool:
-    """导航到 Leaderboard → 点击 Upload Trades → 签名确认"""
+    """
+    导航到 Leaderboard → Resolve Bets(签名) → Upload Trades(签名)
+    → 等待变为 No Actions Needed
+    """
     log(account_id, "开始上传交易记录...")
 
     if not await click_menu_button(page, account_id):
@@ -965,34 +979,77 @@ async def upload_trades(
         log(account_id, f"点击 Leaderboard 失败: {e}")
         return False
 
-    # 等待 Upload Trades 按钮出现
+    # 如果已经是 No Actions Needed，直接返回
+    no_action = page.locator("button:has-text('No Actions Needed')")
+    if await no_action.count() > 0:
+        log(account_id, "已是 No Actions Needed，无需操作")
+        return True
+
+    # ── Step 1: Resolve Bets ──
+    resolve_btn = page.locator("button:has-text('Resolve Bets')")
+    for _ in range(15):
+        if await resolve_btn.count() > 0:
+            break
+        if await no_action.count() > 0:
+            log(account_id, "已是 No Actions Needed，无需操作")
+            return True
+        await asyncio.sleep(1)
+
+    if await resolve_btn.count() > 0:
+        try:
+            await resolve_btn.first.click(timeout=5000)
+            log(account_id, "已点击 Resolve Bets")
+            await asyncio.sleep(2)
+        except Exception as e:
+            log(account_id, f"点击 Resolve Bets 失败: {e}")
+
+        # 等待钱包签名完成（后台 handler 自动处理）
+        for _ in range(30):
+            # Resolve 完成后按钮会消失或变成 Upload Trades / No Actions Needed
+            if await resolve_btn.count() == 0:
+                break
+            if await no_action.count() > 0:
+                break
+            await asyncio.sleep(1)
+        log(account_id, "Resolve Bets 完成")
+        await asyncio.sleep(2)
+
+    # 如果 Resolve 后直接变成 No Actions Needed
+    if await no_action.count() > 0:
+        log(account_id, "Resolve 后已是 No Actions Needed")
+        return True
+
+    # ── Step 2: Upload Trades ──
     upload_btn = page.locator("button:has-text('Upload Trades')")
-    for _ in range(30):
+    for _ in range(15):
         if await upload_btn.count() > 0:
             break
+        if await no_action.count() > 0:
+            log(account_id, "已是 No Actions Needed")
+            return True
         await asyncio.sleep(1)
+
+    if await upload_btn.count() > 0:
+        try:
+            await upload_btn.first.click(timeout=5000)
+            log(account_id, "已点击 Upload Trades")
+            await asyncio.sleep(2)
+        except Exception as e:
+            log(account_id, f"点击 Upload Trades 失败: {e}")
+            return False
+
+        # 等待签名完成 → 按钮变为 No Actions Needed
+        for _ in range(30):
+            if await no_action.count() > 0:
+                break
+            if await upload_btn.count() == 0:
+                break
+            await asyncio.sleep(1)
+
+    if await no_action.count() > 0:
+        log(account_id, "交易记录上传成功 (No Actions Needed)")
     else:
-        log(account_id, "Upload Trades 按钮未出现")
-        return False
-
-    # 点击 Upload Trades
-    try:
-        await upload_btn.first.click(timeout=5000)
-        log(account_id, "已点击 Upload Trades")
-        await asyncio.sleep(2)
-    except Exception as e:
-        log(account_id, f"点击 Upload Trades 失败: {e}")
-        return False
-
-    # 处理签名弹窗（由后台 handler 自动处理）
-    log(account_id, "等待上传签名确认...")
-    await asyncio.sleep(10)
-
-    await asyncio.sleep(3)
-    if await upload_btn.count() == 0 or await page.locator("text=Upload Trades").count() == 0:
-        log(account_id, "交易记录上传成功")
-    else:
-        log(account_id, "上传可能已完成（无法确认状态）")
+        log(account_id, "上传可能已完成（无法确认最终状态）")
 
     return True
 
