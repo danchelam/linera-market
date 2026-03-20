@@ -30,7 +30,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.20.7"
+__version__ = "2026.03.20.9"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -42,6 +42,14 @@ HUBSTUDIO_APP_ID = "202401091194284919430443008"
 HUBSTUDIO_APP_SECRET = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCVBFIS0pB1GzsuXGjND2Gkt/28o4+sQKyWBE91YP/Wq2s623COfrEG7BCDyP0P1jyg0dg9MYw1WNGGtSkP8Be1BxEDk3Xh0PdCtMYjJBkw29TaufohhEvTkbRKiPiQqD5NBcbnTg4HpLxHsXLT64DoKdXzhUej9tKWOs5+V+Yo0a4iWxmNfL94HZFQpVBxI96HPgAfs1Qn1AOJy0iXdQvk8PgqaVbFjMRVSljwdfjyxh7rQNSYrgFmzxUfB/D2C36BuDdACtOUuX47aBB+PJdFpgoCTlAAfMM8oaGCfECVg1wfjf+cIybmI5uFoVtJbTyZyt9BOEl2B38osXriEujtAgMBAAECggEARhyxTP/bTe4RC0AZYxnwlCKpdL70E1SenzrJ8+0+kk829YtXywOa4Snin07Kmk/vWK9C8Y/Fazgt5RaJimEpllgLzkXsOeIq5CzP6KrMW2ujG4JTSL/JOXMdg9AsO0udfHnSWvQjr773gzffUgxFK3a7noc/7MptzJdAnrtWpC9CRd/acSkJ0mZONVMAGtS2Kk1S8EAXBiVo3axK2nqX2zmjWjRopUyQ6zhjOwKlaw/EFQ4kWZLvrVVicPFUesS5EUapN8ipfkF7eqsl4z6Ly3JdbV8LI884ZBjnN6CoZEAGCgNZNSvrrp0AcjSGFEFzDQfDjo7rY+DujhZ7PBNOtQKBgQDeh9yw0uJMfCQXbV+Gv+bDA9mHB4LeKuvt4U5z+MBfmhN6Hj8T0UU8paUrFORNjNvMljnP6vyWz3o9YJnITTQoth2gdAlTZ/Wd4HAxUZm2wDHSA68Iv2OAIeLCCfOWbmXuF1UscuUyX7zbJCXbSA7sxXmjB3GgZ5kXx8kAXHBwRwKBgQCrbfFeJtgX8kjj88A3txfjdNFlh5SVc5VtYQuf/E05Yeh88dLyrqFKzJWXkSYNWbwAjFGNc8HtbrMd4Ot2E8XCuI1tBknm/7viLjsB6oFTyjQgWhvutCPYiLs+AzL6GJDjCRUKUSQ+iyDDU40udEJH57AiKYhpFtSZ2Qh7KjsLKwKBgQDQ3SQ+szDEKSCW/IlUqHmnQM3C90HV1ONserRwFWI6WRs+23TI3PrnWXIVZZ6DS1piQ/4vMJez1TkesrSkVBJIw+Y6266FImZesHGdWMG1zd71B5AZ3ck+Uo/LIBwJbcUuG6hN9+k3xrQz21HM521avl7Urf/wVkxTDamTNTAzsQKBgQCm+jjfJ2DWulVLS9JPspSfJdsMVOpiRCopVxx2oc8qdHZ6tSVu4rASZoHTFzuER4J62jJZYIZlWa04DivrYEkBaLfAmR6E1VXRcoxhSmTcE5mAZaTNdkNwF4aiWYVe22zM57zJxs1R6jxoZUqgE/e3iDIkpGXNTsKYdDDxnunR7wKBgQC4fJFDYY2YbHWrOJFIQPFtg53Ea/WMrC6xPkvk4edqvaCSkmag2cw7e/AfV4tcmX+DS01Brpgo1SodGsVxmtALUWVCFGWMpl6H2MT9US5tq8hNGhwgOOmMUoPhfxRy1JHvgD8drjkKxZ4wIPq7ALJwFx3vL+Nchlxqq6IptDFeBA=="
 HUBSTUDIO_GROUP_CODE = "11846150"
 HUBSTUDIO_INSTALL_PATH = r"E:\Hubstudio"
+# Hubstudio 文档：客户端接口默认超时 600s；browser/start 在代理/冷启动时可能很慢
+try:
+    HUBSTUDIO_BROWSER_START_TIMEOUT = int(
+        os.environ.get("HUBSTUDIO_BROWSER_START_TIMEOUT", "600").strip()
+    )
+except ValueError:
+    HUBSTUDIO_BROWSER_START_TIMEOUT = 600
+HUBSTUDIO_BROWSER_START_TIMEOUT = max(120, min(HUBSTUDIO_BROWSER_START_TIMEOUT, 3600))
 
 OKX_EXTENSION_ID = "mcohilncbfahbmgdjkbpemcciiolgcge"
 OKX_DEFAULT_PASSWORD = "DD112211"
@@ -280,20 +288,27 @@ class HubstudioManager:
         import time as _t
         url = f"{self.api_base_url}/api/v1/browser/start"
         payload = {"containerCode": str(container_code)}
+        # (连接超时, 读取超时) — 与 Hubstudio 默认 600s 一致，避免代理/冷启动时过早断开
+        req_timeout = (30, HUBSTUDIO_BROWSER_START_TIMEOUT)
         for attempt in range(5):
             try:
-                resp = requests.post(url, json=payload, timeout=120)
+                if attempt == 0:
+                    log(
+                        container_code,
+                        f"正在请求启动环境（代理/冷启动可能较慢，最长等待 {HUBSTUDIO_BROWSER_START_TIMEOUT}s）...",
+                    )
+                resp = requests.post(url, json=payload, timeout=req_timeout)
                 data = resp.json()
-                if data.get("code") == 0:
-                    port = data.get("data", {}).get("debuggingPort")
+                code = data.get("code")
+                inner = data.get("data") or {}
+                msg = data.get("msg", "未知")
+                if code == 0:
+                    port = inner.get("debuggingPort")
                     if port:
                         return f"127.0.0.1:{port}"
                     log(container_code, f"启动成功但未返回 debuggingPort: {data}")
                     return None
-                status_code = data.get("data", {}).get("statusCode", "")
-                msg = data.get("msg", "未知")
-                if status_code == -10013:
-                    # 环境正在运行，尝试获取已有端口
+                if code == -10013 or inner.get("statusCode") == -10013:
                     log(container_code, "环境已在运行，尝试获取调试端口...")
                     return self._get_running_port(container_code)
                 if "频繁" in msg or "Too many" in msg:
@@ -301,9 +316,16 @@ class HubstudioManager:
                     log(container_code, f"API 限速，{wait}s 后重试({attempt + 2}/5)...")
                     _t.sleep(wait)
                     continue
-                log(container_code, f"启动失败: {msg}")
+                log(container_code, f"启动失败: {msg} (code={code})")
                 return None
             except Exception as e:
+                err = str(e)
+                if "timed out" in err.lower() or "timeout" in err.lower():
+                    log(
+                        container_code,
+                        f"启动请求超时（{HUBSTUDIO_BROWSER_START_TIMEOUT}s）。"
+                        "若环境带代理，请检查代理是否可用；或先在 Hubstudio 里手动打开该环境一次。",
+                    )
                 log(container_code, f"启动异常: {e}")
                 return None
         return None
@@ -315,11 +337,13 @@ class HubstudioManager:
         _t.sleep(3)
         url = f"{self.api_base_url}/api/v1/browser/start"
         payload = {"containerCode": str(container_code)}
+        req_timeout = (30, HUBSTUDIO_BROWSER_START_TIMEOUT)
         try:
-            resp = requests.post(url, json=payload, timeout=120)
+            resp = requests.post(url, json=payload, timeout=req_timeout)
             data = resp.json()
+            inner = data.get("data") or {}
             if data.get("code") == 0:
-                port = data.get("data", {}).get("debuggingPort")
+                port = inner.get("debuggingPort")
                 if port:
                     return f"127.0.0.1:{port}"
         except Exception:
