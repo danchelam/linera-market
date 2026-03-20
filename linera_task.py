@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.20.9"
+__version__ = "2026.03.20.11"
 
 import asyncio
 import random
@@ -1090,21 +1090,17 @@ async def linera_task(
     if not bet_ok:
         return False
 
-    # ── 上传并校验 ──
-    await upload_trades(page, context, account_id)
-
-    # 校验 Trades 数量（通过 History 页面，最多补跑 2 轮）
+    # ── 先校验 History 笔数是否达到目标，不足则补跑（此阶段不上传） ──
     if initial_trades >= 0:
         target_total = initial_trades + target_bets
-        for verify_round in range(2):
-            # 导航到 History 读取最终数量
+        for _ in range(2):
             if not await navigate_to_history(page, account_id):
                 log(account_id, "无法导航到 History，跳过校验")
                 break
             await asyncio.sleep(3)
             final_trades = await get_trades_count(page, account_id)
             if final_trades < 0:
-                log(account_id, "无法读取最终 Trades 数量，跳过校验")
+                log(account_id, "无法读取 Trades 数量")
                 break
 
             shortfall = target_total - final_trades
@@ -1125,8 +1121,24 @@ async def linera_task(
                 log(account_id, "补跑失败")
                 break
 
-            # 再次上传
-            await upload_trades(page, context, account_id)
+        # 上传前最后一次确认（避免补跑后仍不足）
+        if not await navigate_to_history(page, account_id):
+            log(account_id, "上传前无法进入 History，中止上传")
+            return False
+        await asyncio.sleep(2)
+        final_trades = await get_trades_count(page, account_id)
+        if final_trades < 0:
+            log(account_id, "无法读取 Trades 数量，中止上传")
+            return False
+        if final_trades < target_total:
+            log(account_id, f"Trades 仍不足 ({final_trades}/{target_total})，跳过上传")
+            return False
+        log(account_id, f"笔数已达标，开始上传：Trades {final_trades} >= {target_total}")
+    else:
+        log(account_id, "无下注前 Trades 基线，跳过上传前校验")
+
+    # ── 校验通过后再上传 ──
+    await upload_trades(page, context, account_id)
 
     return True
 
