@@ -1,7 +1,7 @@
 """
-通用浏览器自动化底层模块 (Playwright 版本 2.0)
+通用浏览器自动化底层模块 (Playwright 版本 3.0 — Hubstudio)
 ─────────────────────────────────────────────
-- AdsPower 浏览器管理（启动/关闭）
+- Hubstudio 指纹浏览器管理（启动/关闭）
 - OKX 钱包解锁（Shadow DOM 自动穿透 + React 受控组件兼容）
 - 钱包弹窗自动处理（事件驱动，连接/签名/确认）
 - Excel/CSV 账号读取
@@ -28,14 +28,13 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.20.3"
+__version__ = "2026.03.20.5"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
 # ════════════════════════════════════════════════════════════
 
-ADSPOWER_API_BASE_URL = "http://127.0.0.1:50325"
-ADSPOWER_API_KEY = "5b9664bf3e65c5a0622d1b5d0d766eac"
+HUBSTUDIO_API_BASE_URL = "http://127.0.0.1:6873"
 OKX_EXTENSION_ID = "mcohilncbfahbmgdjkbpemcciiolgcge"
 OKX_DEFAULT_PASSWORD = "DD112211"
 
@@ -140,7 +139,7 @@ class AccountInfo:
 
 def load_accounts(excel_path: Optional[str] = None) -> List[AccountInfo]:
     if excel_path is None:
-        excel_path = os.path.join(_get_base_dir(), "shuju.xlsx")
+        excel_path = os.path.join(_get_base_dir(), "hubshuju.xlsx")
 
     base, _ = os.path.splitext(excel_path)
     chosen = excel_path
@@ -155,7 +154,7 @@ def load_accounts(excel_path: Optional[str] = None) -> List[AccountInfo]:
         if chosen.lower().endswith(".csv"):
             df = pd.read_csv(chosen, dtype=str, encoding="utf-8", keep_default_na=False)
         else:
-            df = pd.read_excel(chosen, dtype=str).fillna("")
+            df = pd.read_excel(chosen, header=1, dtype=str).fillna("")
         print(f"前 5 行:\n{df.head()}")
 
         def sv(x):
@@ -163,15 +162,17 @@ def load_accounts(excel_path: Optional[str] = None) -> List[AccountInfo]:
 
         for _, row in df.iterrows():
             id_val = (
-                sv(row.get("id", ""))
+                sv(row.get("\u73af\u5883ID", ""))
+                or sv(row.get("id", ""))
                 or sv(row.get("user_id", ""))
-                or sv(row.get("acc_id", ""))
+                or sv(row.get("containerCode", ""))
             )
+            name_val = sv(row.get("\u73af\u5883\u540d\u79f0", ""))
             if id_val:
                 accounts.append(AccountInfo(
                     id=id_val,
-                    ua=sv(row.get("ua", "")),
-                    proxy=sv(row.get("proxy", "")) if "proxy" in row else "",
+                    ua=name_val,
+                    proxy="",
                 ))
         print(f"加载账号数量: {len(accounts)}")
     except Exception as e:
@@ -180,51 +181,74 @@ def load_accounts(excel_path: Optional[str] = None) -> List[AccountInfo]:
 
 
 # ════════════════════════════════════════════════════════════
-#  AdsPower 浏览器管理
+#  Hubstudio 浏览器管理
 # ════════════════════════════════════════════════════════════
 
-class AdsPowerManager:
-    def __init__(
-        self,
-        api_base_url: str = ADSPOWER_API_BASE_URL,
-        api_key: str = "",
-    ):
+class HubstudioManager:
+    def __init__(self, api_base_url: str = HUBSTUDIO_API_BASE_URL):
         self.api_base_url = api_base_url
-        self._headers = {"X-Api-Key": api_key} if api_key else None
 
-    def start_browser(self, user_id: str) -> Optional[str]:
-        """启动浏览器，返回 CDP 地址（如 '127.0.0.1:xxxxx'）"""
+    def start_browser(self, container_code: str) -> Optional[str]:
+        """启动浏览器环境，返回 CDP 地址（如 '127.0.0.1:xxxxx'）"""
         import time as _t
-        url = f"{self.api_base_url}/api/v1/browser/start?user_id={user_id}"
+        url = f"{self.api_base_url}/api/v1/browser/start"
+        payload = {"containerCode": str(container_code)}
         for attempt in range(5):
             try:
-                resp = requests.get(url, timeout=60, headers=self._headers)
+                resp = requests.post(url, json=payload, timeout=120)
                 data = resp.json()
-                if data.get("code") == 0 and "debug_port" in data.get("data", {}):
-                    port = data["data"]["debug_port"]
-                    return port if ":" in str(port) else f"127.0.0.1:{port}"
-                if "Too many request" in data.get("msg", ""):
-                    wait = (attempt + 1) * 2
-                    log(user_id, f"API 限速，{wait}s 后重试({attempt + 2}/5)...")
+                if data.get("code") == 0:
+                    port = data.get("data", {}).get("debuggingPort")
+                    if port:
+                        return f"127.0.0.1:{port}"
+                    log(container_code, f"启动成功但未返回 debuggingPort: {data}")
+                    return None
+                status_code = data.get("data", {}).get("statusCode", "")
+                msg = data.get("msg", "未知")
+                if status_code == -10013:
+                    # 环境正在运行，尝试获取已有端口
+                    log(container_code, "环境已在运行，尝试获取调试端口...")
+                    return self._get_running_port(container_code)
+                if "频繁" in msg or "Too many" in msg:
+                    wait = (attempt + 1) * 3
+                    log(container_code, f"API 限速，{wait}s 后重试({attempt + 2}/5)...")
                     _t.sleep(wait)
                     continue
-                log(user_id, f"启动失败: {data.get('msg', '未知')}")
+                log(container_code, f"启动失败: {msg}")
                 return None
             except Exception as e:
-                log(user_id, f"启动异常: {e}")
+                log(container_code, f"启动异常: {e}")
                 return None
         return None
 
-    def close_browser(self, user_id: str) -> bool:
-        url = f"{self.api_base_url}/api/v1/browser/stop?user_id={user_id}"
+    def _get_running_port(self, container_code: str) -> Optional[str]:
+        """环境已在运行时，关闭后重新启动获取端口"""
+        self.close_browser(container_code)
+        import time as _t
+        _t.sleep(3)
+        url = f"{self.api_base_url}/api/v1/browser/start"
+        payload = {"containerCode": str(container_code)}
         try:
-            resp = requests.get(url, timeout=30, headers=self._headers)
+            resp = requests.post(url, json=payload, timeout=120)
+            data = resp.json()
+            if data.get("code") == 0:
+                port = data.get("data", {}).get("debuggingPort")
+                if port:
+                    return f"127.0.0.1:{port}"
+        except Exception:
+            pass
+        return None
+
+    def close_browser(self, container_code: str) -> bool:
+        url = f"{self.api_base_url}/api/v1/browser/stop"
+        try:
+            resp = requests.post(url, json={"containerCode": str(container_code)}, timeout=30)
             data = resp.json()
             ok = data.get("code") == 0
-            log(user_id, "关闭浏览器成功" if ok else f"关闭失败: {data.get('msg')}")
+            log(container_code, "关闭浏览器成功" if ok else f"关闭失败: {data.get('msg')}")
             return ok
         except Exception as e:
-            log(user_id, f"关闭异常: {e}")
+            log(container_code, f"关闭异常: {e}")
             return False
 
 
@@ -889,26 +913,27 @@ async def drain_existing_popups(
 
 async def run_single_account(
     pw: Playwright,
-    ads: AdsPowerManager,
+    hub: HubstudioManager,
     account: AccountInfo,
     task_func,
     **task_kwargs,
 ):
     """
-    完整流程：启动浏览器 → CDP → 弹窗处理器 → 解锁钱包 → 执行业务 → 关闭。
+    完整流程：启动浏览器 → CDP → 弹窗处理器 → 执行业务 → 关闭。
 
     task_func 签名:
         async def my_task(page, context, account_id, popup_handler, **kw) -> bool
     """
-    aid = account.id
-    if is_account_completed(aid):
+    container_code = account.id
+    aid = account.ua or container_code  # 环境名称用于日志
+    if is_account_completed(container_code):
         log(aid, "当前周期已完成，跳过。")
         return
 
-    cdp_addr = await asyncio.to_thread(ads.start_browser, aid)
+    cdp_addr = await asyncio.to_thread(hub.start_browser, container_code)
     if not cdp_addr:
         return
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2)
 
     browser: Optional[Browser] = None
     try:
@@ -946,7 +971,7 @@ async def run_single_account(
         if STOP_FLAG:
             log(aid, "收到停止信号，未记录。")
         elif success:
-            save_completed_task(aid)
+            save_completed_task(container_code)
             log(aid, "任务全部完成，已记录。")
         else:
             log(aid, "任务未完整完成。")
@@ -961,19 +986,18 @@ async def run_single_account(
                 await browser.close()
             except Exception:
                 pass
-            await asyncio.to_thread(ads.close_browser, aid)
+            await asyncio.to_thread(hub.close_browser, container_code)
 
 
 async def run_batch(
     accounts: List[AccountInfo],
     task_func,
     max_workers: int = 3,
-    api_base_url: str = ADSPOWER_API_BASE_URL,
-    api_key: str = ADSPOWER_API_KEY,
+    api_base_url: str = HUBSTUDIO_API_BASE_URL,
     **task_kwargs,
 ):
     """批量并发运行，自带两轮执行（第二轮补跑失败的）"""
-    ads = AdsPowerManager(api_base_url=api_base_url, api_key=api_key)
+    hub = HubstudioManager(api_base_url=api_base_url)
     sem = asyncio.Semaphore(max_workers)
 
     async with async_playwright() as pw:
@@ -982,7 +1006,7 @@ async def run_batch(
             async with sem:
                 if STOP_FLAG:
                     return
-                await run_single_account(pw, ads, acc, task_func, **task_kwargs)
+                await run_single_account(pw, hub, acc, task_func, **task_kwargs)
 
         # 第一轮
         log("SYSTEM", f"第一轮：{len(accounts)} 个账号")

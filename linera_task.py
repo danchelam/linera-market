@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.20.3"
+__version__ = "2026.03.20.5"
 
 import asyncio
 import random
@@ -28,7 +28,6 @@ from base_module import (
     run_batch,
     log,
     STOP_FLAG,
-    ADSPOWER_API_KEY,
 )
 
 # ─── 页面配置 ─────────────────────────────────────────
@@ -1139,7 +1138,7 @@ async def linera_task(
 def main():
     accounts = load_accounts()
     if not accounts:
-        print("未读取到任何账号，请检查 shuju.xlsx")
+        print("未读取到任何账号，请检查 hubshuju.xlsx")
         sys.exit(1)
 
     print(f"共读取到 {len(accounts)} 个账号。")
@@ -1152,7 +1151,7 @@ def main():
         target = accounts[0]
         print(f"单窗口测试: {target.id}")
         asyncio.run(run_batch(
-            [target], linera_task, max_workers=1, api_key=ADSPOWER_API_KEY,
+            [target], linera_task, max_workers=1,
         ))
     elif mode == "2":
         try:
@@ -1161,7 +1160,7 @@ def main():
             workers = 1
         print(f"批量运行，并发: {workers}")
         asyncio.run(run_batch(
-            accounts, linera_task, max_workers=workers, api_key=ADSPOWER_API_KEY,
+            accounts, linera_task, max_workers=workers,
         ))
     else:
         print("无效输入。")
