@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.20.11"
+__version__ = "2026.03.20.12"
 
 import asyncio
 import random
@@ -476,124 +476,123 @@ async def login(
         await asyncio.sleep(8)
 
         # ── 检测是否需要 Connect Wallet（带重试） ──
-        okx_selected = False
-        for connect_try in range(3):
-            connect_btn = page.locator("button:has-text('Connect Wallet')")
-            if await connect_btn.count() == 0:
-                if connect_try == 0:
-                    log(account_id, "未检测到 Connect Wallet 按钮（可能已连接）")
-                okx_selected = True
-                break
+        need_full_connect = False
+        connect_btn = page.locator("button:has-text('Connect Wallet')")
+        if await connect_btn.count() > 0:
+            need_full_connect = True
 
-            log(account_id, f"检测到 Connect Wallet 按钮，开始连接...（第 {connect_try+1} 次）")
-            await connect_btn.first.click(timeout=5000)
-            await asyncio.sleep(2)
-
-            # 等待 OKX Wallet 选项加载（最多 10 秒）
-            okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
-            for _ in range(20):
-                if await okx_option.count() > 0:
-                    break
-                await asyncio.sleep(0.5)
-
-            if await okx_option.count() > 0:
-                await okx_option.first.click(timeout=5000)
-                log(account_id, "已选择 OKX Wallet")
-                await asyncio.sleep(3)
-                okx_selected = True
-                break
-
-            # 文本匹配兜底
-            okx_text = page.locator("text=OKX Wallet")
-            if await okx_text.count() > 0:
-                await okx_text.first.click(timeout=5000)
-                log(account_id, "已选择 OKX Wallet (文本匹配)")
-                await asyncio.sleep(3)
-                okx_selected = True
-                break
-
-            # 没找到 → 关闭弹窗，刷新页面重试
-            log(account_id, "OKX Wallet 未加载，刷新页面重试...")
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(1)
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=20000)
-            except Exception:
-                pass
-            await asyncio.sleep(5)
-
-        if not okx_selected:
-            log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
-            return False
-
-        # ── 处理钱包弹窗（可能是解锁弹窗或签名弹窗） ──
-        for round_num in range(5):
-            wallet_page = None
-            for p in context.pages:
-                try:
-                    u = p.url or ""
-                except Exception:
-                    continue
-                if "chrome-extension://" in u and "offscreen" not in u:
-                    wallet_page = p
+        if need_full_connect:
+            okx_selected = False
+            for connect_try in range(3):
+                connect_btn = page.locator("button:has-text('Connect Wallet')")
+                if await connect_btn.count() == 0:
+                    okx_selected = True
                     break
 
-            if not wallet_page:
-                if round_num == 0:
-                    # 第一轮没弹窗，多等一下
-                    await asyncio.sleep(5)
-                    continue
-                break
+                log(account_id, f"检测到 Connect Wallet 按钮，开始连接...（第 {connect_try+1} 次）")
+                await connect_btn.first.click(timeout=5000)
+                await asyncio.sleep(2)
 
-            log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
-            try:
-                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-
-            # 检查是否有密码框（解锁弹窗）
-            has_pwd = False
-            for frame in wallet_page.frames:
-                try:
-                    if await frame.locator('input[type="password"]').count() > 0:
-                        has_pwd = True
+                okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
+                for _ in range(20):
+                    if await okx_option.count() > 0:
                         break
-                except Exception:
-                    continue
+                    await asyncio.sleep(0.5)
 
-            if has_pwd:
-                log(account_id, "弹窗含密码框，执行解锁...")
-                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
-                await asyncio.sleep(0.5)
-                await _click_unlock_button(wallet_page, context, account_id)
-                await asyncio.sleep(3)
-                # 解锁后可能出现签名弹窗，继续循环处理
-                log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
-            else:
-                # 普通签名/连接弹窗
-                clicked = await _click_wallet_button(wallet_page, account_id)
-                if clicked:
-                    log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
+                if await okx_option.count() > 0:
+                    await okx_option.first.click(timeout=5000)
+                    log(account_id, "已选择 OKX Wallet")
+                    await asyncio.sleep(3)
+                    okx_selected = True
+                    break
+
+                okx_text = page.locator("text=OKX Wallet")
+                if await okx_text.count() > 0:
+                    await okx_text.first.click(timeout=5000)
+                    log(account_id, "已选择 OKX Wallet (文本匹配)")
+                    await asyncio.sleep(3)
+                    okx_selected = True
+                    break
+
+                log(account_id, "OKX Wallet 未加载，刷新页面重试...")
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(1)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+            if not okx_selected:
+                log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
+                return False
+
+            # ── 首次连接：处理钱包弹窗（解锁/连接） ──
+            for round_num in range(5):
+                wallet_page = None
+                for p in context.pages:
+                    try:
+                        u = p.url or ""
+                    except Exception:
+                        continue
+                    if "chrome-extension://" in u and "offscreen" not in u:
+                        wallet_page = p
+                        break
+
+                if not wallet_page:
+                    if round_num == 0:
+                        await asyncio.sleep(5)
+                        continue
+                    break
+
+                log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
+                try:
+                    await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+                has_pwd = False
+                for frame in wallet_page.frames:
+                    try:
+                        if await frame.locator('input[type="password"]').count() > 0:
+                            has_pwd = True
+                            break
+                    except Exception:
+                        continue
+
+                if has_pwd:
+                    log(account_id, "弹窗含密码框，执行解锁...")
+                    await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                    await asyncio.sleep(0.5)
+                    await _click_unlock_button(wallet_page, context, account_id)
+                    await asyncio.sleep(3)
+                    log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
+                else:
+                    clicked = await _click_wallet_button(wallet_page, account_id)
+                    if clicked:
+                        log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
+                        await asyncio.sleep(3)
+                    else:
+                        break
+
+            # ── 检测 Select Ethereum network 按钮 ──
+            await asyncio.sleep(2)
+            try:
+                net_btn = page.locator("button[data-testid='SelectNetworkButton']")
+                if await net_btn.count() > 0:
+                    await net_btn.first.click(timeout=5000)
+                    log(account_id, "已点击 Select Ethereum network")
                     await asyncio.sleep(3)
                 else:
-                    break
+                    log(account_id, "未检测到 Select Network 按钮，跳过")
+            except Exception as e:
+                log(account_id, f"Select Network 处理异常: {e}")
+        else:
+            log(account_id, "已登录过，跳过 Connect Wallet 流程")
 
-        # ── 检测 Select Ethereum network 按钮 ──
-        await asyncio.sleep(2)
-        try:
-            net_btn = page.locator("button[data-testid='SelectNetworkButton']")
-            if await net_btn.count() > 0:
-                await net_btn.first.click(timeout=5000)
-                log(account_id, "已点击 Select Ethereum network")
-                await asyncio.sleep(3)
-            else:
-                log(account_id, "未检测到 Select Network 按钮，跳过")
-        except Exception as e:
-            log(account_id, f"Select Network 处理异常: {e}")
-
-        # ── 处理剩余弹窗 + 等待 Claiming chain（同时进行） ──
-        # 弹窗可能在 Claiming chain 期间才弹出，所以需要边等边处理
+        # ── 统一阶段：处理弹窗 + 等待 Claiming chain ──
+        # 不管是首次连接还是已登录，都在这里统一处理所有剩余弹窗和 Claiming chain
         await asyncio.sleep(2)
         claiming_sel = "span:text-is('Claiming chain...')"
         claiming_loc = page.locator(claiming_sel)
@@ -601,7 +600,6 @@ async def login(
         claiming_logged = False
 
         for tick in range(90):
-            # 先检查有没有钱包弹窗需要处理
             wallet_page = None
             for p in context.pages:
                 try:
@@ -621,7 +619,6 @@ async def login(
                     pass
                 await asyncio.sleep(2)
 
-                # 检查是否是解锁弹窗
                 has_pwd = False
                 for frame in wallet_page.frames:
                     try:
@@ -643,7 +640,6 @@ async def login(
                 await asyncio.sleep(3)
                 continue
 
-            # 没有弹窗，检查 Claiming chain
             if await claiming_loc.count() > 0:
                 if not claiming_logged:
                     log(account_id, "检测到 Claiming chain...，等待完成")
