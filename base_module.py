@@ -17,9 +17,11 @@ import asyncio
 import datetime
 import json
 import os
+import subprocess
 import sys
 import random
 import threading
+import time as _time_mod
 from typing import Optional, Dict, List, Callable
 
 import pandas as pd
@@ -28,13 +30,19 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.20.5"
+__version__ = "2026.03.20.7"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
 # ════════════════════════════════════════════════════════════
 
 HUBSTUDIO_API_BASE_URL = "http://127.0.0.1:6873"
+HUBSTUDIO_API_PORT = 6873
+HUBSTUDIO_APP_ID = "202401091194284919430443008"
+HUBSTUDIO_APP_SECRET = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCVBFIS0pB1GzsuXGjND2Gkt/28o4+sQKyWBE91YP/Wq2s623COfrEG7BCDyP0P1jyg0dg9MYw1WNGGtSkP8Be1BxEDk3Xh0PdCtMYjJBkw29TaufohhEvTkbRKiPiQqD5NBcbnTg4HpLxHsXLT64DoKdXzhUej9tKWOs5+V+Yo0a4iWxmNfL94HZFQpVBxI96HPgAfs1Qn1AOJy0iXdQvk8PgqaVbFjMRVSljwdfjyxh7rQNSYrgFmzxUfB/D2C36BuDdACtOUuX47aBB+PJdFpgoCTlAAfMM8oaGCfECVg1wfjf+cIybmI5uFoVtJbTyZyt9BOEl2B38osXriEujtAgMBAAECggEARhyxTP/bTe4RC0AZYxnwlCKpdL70E1SenzrJ8+0+kk829YtXywOa4Snin07Kmk/vWK9C8Y/Fazgt5RaJimEpllgLzkXsOeIq5CzP6KrMW2ujG4JTSL/JOXMdg9AsO0udfHnSWvQjr773gzffUgxFK3a7noc/7MptzJdAnrtWpC9CRd/acSkJ0mZONVMAGtS2Kk1S8EAXBiVo3axK2nqX2zmjWjRopUyQ6zhjOwKlaw/EFQ4kWZLvrVVicPFUesS5EUapN8ipfkF7eqsl4z6Ly3JdbV8LI884ZBjnN6CoZEAGCgNZNSvrrp0AcjSGFEFzDQfDjo7rY+DujhZ7PBNOtQKBgQDeh9yw0uJMfCQXbV+Gv+bDA9mHB4LeKuvt4U5z+MBfmhN6Hj8T0UU8paUrFORNjNvMljnP6vyWz3o9YJnITTQoth2gdAlTZ/Wd4HAxUZm2wDHSA68Iv2OAIeLCCfOWbmXuF1UscuUyX7zbJCXbSA7sxXmjB3GgZ5kXx8kAXHBwRwKBgQCrbfFeJtgX8kjj88A3txfjdNFlh5SVc5VtYQuf/E05Yeh88dLyrqFKzJWXkSYNWbwAjFGNc8HtbrMd4Ot2E8XCuI1tBknm/7viLjsB6oFTyjQgWhvutCPYiLs+AzL6GJDjCRUKUSQ+iyDDU40udEJH57AiKYhpFtSZ2Qh7KjsLKwKBgQDQ3SQ+szDEKSCW/IlUqHmnQM3C90HV1ONserRwFWI6WRs+23TI3PrnWXIVZZ6DS1piQ/4vMJez1TkesrSkVBJIw+Y6266FImZesHGdWMG1zd71B5AZ3ck+Uo/LIBwJbcUuG6hN9+k3xrQz21HM521avl7Urf/wVkxTDamTNTAzsQKBgQCm+jjfJ2DWulVLS9JPspSfJdsMVOpiRCopVxx2oc8qdHZ6tSVu4rASZoHTFzuER4J62jJZYIZlWa04DivrYEkBaLfAmR6E1VXRcoxhSmTcE5mAZaTNdkNwF4aiWYVe22zM57zJxs1R6jxoZUqgE/e3iDIkpGXNTsKYdDDxnunR7wKBgQC4fJFDYY2YbHWrOJFIQPFtg53Ea/WMrC6xPkvk4edqvaCSkmag2cw7e/AfV4tcmX+DS01Brpgo1SodGsVxmtALUWVCFGWMpl6H2MT9US5tq8hNGhwgOOmMUoPhfxRy1JHvgD8drjkKxZ4wIPq7ALJwFx3vL+Nchlxqq6IptDFeBA=="
+HUBSTUDIO_GROUP_CODE = "11846150"
+HUBSTUDIO_INSTALL_PATH = r"E:\Hubstudio"
+
 OKX_EXTENSION_ID = "mcohilncbfahbmgdjkbpemcciiolgcge"
 OKX_DEFAULT_PASSWORD = "DD112211"
 
@@ -178,6 +186,85 @@ def load_accounts(excel_path: Optional[str] = None) -> List[AccountInfo]:
     except Exception as e:
         print(f"加载账号失败: {e}\n路径: {chosen}")
     return accounts
+
+
+# ════════════════════════════════════════════════════════════
+#  Hubstudio API 自动启动
+# ════════════════════════════════════════════════════════════
+
+_connector_process: Optional[subprocess.Popen] = None
+
+
+def _find_connector_exe() -> Optional[str]:
+    """在常见路径中查找 hubstudio_connector.exe"""
+    candidates = [
+        os.path.join(HUBSTUDIO_INSTALL_PATH, "hubstudio_connector.exe"),
+        os.path.join(HUBSTUDIO_INSTALL_PATH, "resources", "hubstudio_connector.exe"),
+    ]
+    for drive in ("C", "D", "E", "F"):
+        for name in ("Hubstudio", "hubstudio", "HubStudio"):
+            candidates.append(os.path.join(f"{drive}:\\{name}", "hubstudio_connector.exe"))
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _is_api_ready(base_url: str = HUBSTUDIO_API_BASE_URL) -> bool:
+    try:
+        resp = requests.get(f"{base_url}/api/v1/env/list", timeout=3,
+                            params={"groupCode": HUBSTUDIO_GROUP_CODE, "pageNo": 1, "pageSize": 1})
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def ensure_hubstudio_api(base_url: str = HUBSTUDIO_API_BASE_URL) -> bool:
+    """确保 Hubstudio API 服务可用，不可用时自动启动 connector"""
+    global _connector_process
+
+    if _is_api_ready(base_url):
+        print("[Hubstudio] API 服务已就绪")
+        return True
+
+    print("[Hubstudio] API 服务未运行，尝试自动启动...")
+
+    exe = _find_connector_exe()
+    if not exe:
+        print(f"[Hubstudio] 未找到 hubstudio_connector.exe，请确认安装路径: {HUBSTUDIO_INSTALL_PATH}")
+        return False
+
+    print(f"[Hubstudio] 找到: {exe}")
+    cmd = [
+        exe,
+        f"--server_mode=http",
+        f"--http_port={HUBSTUDIO_API_PORT}",
+        f"--app_id={HUBSTUDIO_APP_ID}",
+        f"--group_code={HUBSTUDIO_GROUP_CODE}",
+        f"--app_secret={HUBSTUDIO_APP_SECRET}",
+    ]
+
+    try:
+        _connector_process = subprocess.Popen(
+            cmd,
+            cwd=os.path.dirname(exe),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        print(f"[Hubstudio] connector 已启动 (PID: {_connector_process.pid})，等待 API 就绪...")
+    except Exception as e:
+        print(f"[Hubstudio] 启动 connector 失败: {e}")
+        return False
+
+    for i in range(30):
+        _time_mod.sleep(1)
+        if _is_api_ready(base_url):
+            print(f"[Hubstudio] API 服务就绪 (等待 {i + 1}s)")
+            return True
+
+    print("[Hubstudio] API 启动超时（30s），请手动检查")
+    return False
 
 
 # ════════════════════════════════════════════════════════════
@@ -997,6 +1084,9 @@ async def run_batch(
     **task_kwargs,
 ):
     """批量并发运行，自带两轮执行（第二轮补跑失败的）"""
+    if not await asyncio.to_thread(ensure_hubstudio_api, api_base_url):
+        print("[错误] Hubstudio API 不可用，任务终止")
+        return
     hub = HubstudioManager(api_base_url=api_base_url)
     sem = asyncio.Semaphore(max_workers)
 
