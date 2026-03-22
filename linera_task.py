@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.5"
+__version__ = "2026.03.23.6"
 
 import asyncio
 import random
@@ -430,6 +430,55 @@ async def login(
 
         log(account_id, "History 页面已打开，等待加载...")
         await asyncio.sleep(8)
+
+        # ── 预检：先处理可能已存在的钱包弹窗（如解锁弹窗） ──
+        for pre_check in range(3):
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    u = p.url or ""
+                except Exception:
+                    continue
+                if _is_wallet_popup(u):
+                    wallet_page = p
+                    break
+
+            if not wallet_page:
+                break
+
+            log(account_id, f"发现已有钱包弹窗: {wallet_page.url[-60:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            has_pwd = False
+            for frame in wallet_page.frames:
+                try:
+                    if await frame.locator('input[type="password"]').count() > 0:
+                        has_pwd = True
+                        break
+                except Exception:
+                    continue
+
+            if has_pwd:
+                log(account_id, "弹窗含密码框，执行解锁...")
+                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                await asyncio.sleep(0.5)
+                await _click_unlock_button(wallet_page, context, account_id)
+                await asyncio.sleep(3)
+                log(account_id, "钱包预解锁完成")
+            else:
+                clicked = await _click_wallet_button(wallet_page, account_id)
+                if clicked:
+                    log(account_id, "已处理预弹窗")
+                    await asyncio.sleep(3)
+                else:
+                    break
+
+        # 解锁后等待页面状态更新
+        await asyncio.sleep(3)
 
         # ── 检测是否需要 Connect Wallet（带重试） ──
         need_full_connect = False
