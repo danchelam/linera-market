@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.6"
+__version__ = "2026.03.23.7"
 
 import asyncio
 import random
@@ -1036,6 +1036,165 @@ async def upload_trades(
 
 
 # ════════════════════════════════════════════════════════
+#  Claim Quest（Portal 领取任务奖励）
+# ════════════════════════════════════════════════════════
+
+PORTAL_QUEST_URL = "https://portal.linera.net/quests?taskGuid=b2f274a1-962e-4b99-8bc6-3eaf9e68ead6"
+
+
+async def claim_quest(
+    page: Page, context: BrowserContext, account_id: str,
+    popup_handler: WalletPopupHandler,
+) -> bool:
+    """
+    进入 Portal Quest 页面 → 检测登录状态 → 如需登录则走 OKX 签名 → 点 Claim → 签名
+    """
+    log(account_id, "开始 Claim Quest...")
+
+    # ── 导航到 Quest 页面 ──
+    for nav_try in range(3):
+        try:
+            await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+            break
+        except Exception as e:
+            if nav_try < 2:
+                log(account_id, f"导航到 Portal 失败，重试 ({nav_try+1}/3)...")
+                await asyncio.sleep(3)
+            else:
+                log(account_id, f"导航到 Portal 彻底失败: {e}")
+                return False
+
+    # ── 检测登录状态 ──
+    claim_btn = page.locator("button:has-text('Claim')")
+    signin_btn = page.locator("button:has-text('Sign in')")
+
+    for _ in range(15):
+        if await claim_btn.count() > 0:
+            break
+        if await signin_btn.count() > 0:
+            break
+        await asyncio.sleep(1)
+
+    # ── 未登录：点 Sign in → 选 OKX Wallet → 处理弹窗 → 重新进入 ──
+    if await signin_btn.count() > 0 and await claim_btn.count() == 0:
+        log(account_id, "Portal 未登录，开始签名登录...")
+        try:
+            await signin_btn.first.click(timeout=5000)
+            await asyncio.sleep(3)
+        except Exception as e:
+            log(account_id, f"点击 Sign in 失败: {e}")
+            return False
+
+        # 选择 OKX Wallet
+        okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
+        for _ in range(20):
+            if await okx_option.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+
+        if await okx_option.count() > 0:
+            await okx_option.first.click(timeout=5000)
+            log(account_id, "已选择 OKX Wallet (Portal)")
+            await asyncio.sleep(3)
+        else:
+            okx_text = page.locator("text=OKX Wallet")
+            if await okx_text.count() > 0:
+                await okx_text.first.click(timeout=5000)
+                log(account_id, "已选择 OKX Wallet (文本匹配)")
+                await asyncio.sleep(3)
+            else:
+                log(account_id, "Portal 未找到 OKX Wallet 选项")
+                return False
+
+        # 处理登录弹窗（解锁 + 签名），最多等 30 秒
+        for tick in range(30):
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    u = p.url or ""
+                except Exception:
+                    continue
+                if _is_wallet_popup(u):
+                    wallet_page = p
+                    break
+
+            if not wallet_page:
+                await asyncio.sleep(1)
+                continue
+
+            log(account_id, f"Portal 登录弹窗: {wallet_page.url[-60:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            has_pwd = False
+            for frame in wallet_page.frames:
+                try:
+                    if await frame.locator('input[type="password"]').count() > 0:
+                        has_pwd = True
+                        break
+                except Exception:
+                    continue
+
+            if has_pwd:
+                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                await asyncio.sleep(0.5)
+                await _click_unlock_button(wallet_page, context, account_id)
+                log(account_id, "Portal 钱包解锁完成")
+            else:
+                await _click_wallet_button(wallet_page, account_id)
+                log(account_id, "Portal 登录弹窗已处理")
+
+            await asyncio.sleep(3)
+
+        # 登录完成后重新进入 Quest 页面
+        log(account_id, "Portal 登录完成，重新进入 Quest 页面...")
+        try:
+            await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+        except Exception as e:
+            log(account_id, f"重新进入 Quest 页面失败: {e}")
+            return False
+
+        # 等待 Claim 按钮出现
+        for _ in range(15):
+            if await claim_btn.count() > 0:
+                break
+            await asyncio.sleep(1)
+
+    # ── 点击 Claim ──
+    if await claim_btn.count() == 0:
+        log(account_id, "未找到 Claim 按钮，可能已经 Claim 过或未达标")
+        return False
+
+    try:
+        await claim_btn.first.click(timeout=5000)
+        log(account_id, "已点击 Claim")
+        await asyncio.sleep(2)
+    except Exception as e:
+        log(account_id, f"点击 Claim 失败: {e}")
+        return False
+
+    # 等待钱包签名（后台 handler 自动处理）
+    for _ in range(30):
+        try:
+            if await claim_btn.count() == 0:
+                break
+            is_disabled = await claim_btn.first.get_attribute("disabled")
+            if is_disabled is not None:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+    log(account_id, "Claim Quest 完成")
+    return True
+
+
+# ════════════════════════════════════════════════════════
 #  主任务函数
 # ════════════════════════════════════════════════════════
 
@@ -1139,6 +1298,9 @@ async def linera_task(
 
     # ── Step 5: 上传 ──
     await upload_trades(page, context, account_id)
+
+    # ── Step 6: Claim Quest ──
+    await claim_quest(page, context, account_id, popup_handler)
 
     return True
 
