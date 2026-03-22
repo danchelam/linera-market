@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.8"
+__version__ = "2026.03.23.9"
 
 import asyncio
 import random
@@ -1086,12 +1086,30 @@ async def claim_quest(
     # ── 未登录：点 Sign in → 选 OKX Wallet → 处理弹窗 → 重新进入 ──
     if await signin_btn.count() > 0 and await claim_btn.count() == 0:
         log(account_id, "Portal 未登录，开始签名登录...")
+        clicked_signin = False
         try:
+            await signin_btn.first.wait_for(state="visible", timeout=10000)
             await signin_btn.first.click(timeout=5000)
-            await asyncio.sleep(3)
-        except Exception as e:
-            log(account_id, f"点击 Sign in 失败: {e}")
-            return False
+            clicked_signin = True
+        except Exception:
+            pass
+        if not clicked_signin:
+            try:
+                await page.evaluate("""() => {
+                    for (const btn of document.querySelectorAll('button')) {
+                        if (btn.textContent.includes('Sign in')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
+                clicked_signin = True
+                log(account_id, "已通过 JS 点击 Sign in")
+            except Exception as e:
+                log(account_id, f"点击 Sign in 失败: {e}")
+                return False
+        await asyncio.sleep(3)
 
         # 选择 OKX Wallet
         okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
