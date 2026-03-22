@@ -30,7 +30,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.23.2"
+__version__ = "2026.03.23.4"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -966,7 +966,7 @@ class WalletPopupHandler:
             url = page.url
         except Exception:
             return
-        if "chrome-extension://" not in url:
+        if "chrome-extension://" not in url or "notification.html" not in url:
             return
 
         log(self.account_id, f"检测到钱包弹窗: {url[:80]}")
@@ -1009,9 +1009,9 @@ async def drain_existing_popups(
             url = p.url or ""
         except Exception:
             continue
-        if "chrome-extension://" not in url:
+        if "chrome-extension://" not in url or "notification.html" not in url:
             continue
-        log(account_id, f"清理残留弹窗: {url[:60]}")
+        log(account_id, f"清理残留弹窗: {url[:80]}")
         try:
             await _click_wallet_button(p, account_id)
         except Exception:

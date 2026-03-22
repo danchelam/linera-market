@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.2"
+__version__ = "2026.03.23.4"
 
 import asyncio
 import random
@@ -34,6 +34,11 @@ from base_module import (
 DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
 TARGET_BETS = 15
+
+
+def _is_wallet_popup(url: str) -> bool:
+    """判断一个页面 URL 是否为 OKX 钱包弹窗（notification.html）"""
+    return "chrome-extension://" in url and "notification.html" in url
 
 
 # ════════════════════════════════════════════════════════
@@ -121,7 +126,7 @@ async def handle_wallet_popups_manual(
                 url = p.url or ""
             except Exception:
                 continue
-            if "chrome-extension://" not in url or "offscreen" in url:
+            if not _is_wallet_popup(url):
                 continue
 
             log(account_id, f"发现钱包弹窗: {url[-60:]}")
@@ -141,7 +146,7 @@ async def handle_wallet_popups_manual(
                                 u2 = p2.url or ""
                             except Exception:
                                 continue
-                            if "chrome-extension://" in u2 and "offscreen" not in u2:
+                            if _is_wallet_popup(u2):
                                 await asyncio.sleep(1.5)
                                 await _click_wallet_button(p2, account_id)
                                 still_open = True
@@ -486,7 +491,7 @@ async def login(
                         u = p.url or ""
                     except Exception:
                         continue
-                    if "chrome-extension://" in u and "offscreen" not in u:
+                    if _is_wallet_popup(u):
                         wallet_page = p
                         break
 
@@ -557,7 +562,7 @@ async def login(
                     u = p.url or ""
                 except Exception:
                     continue
-                if "chrome-extension://" in u and "offscreen" not in u:
+                if _is_wallet_popup(u):
                     wallet_page = p
                     break
 
