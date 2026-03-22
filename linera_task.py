@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.7"
+__version__ = "2026.03.23.8"
 
 import asyncio
 import random
@@ -796,10 +796,16 @@ async def run_betting_loop(
 ) -> bool:
     completed = 0
     consecutive_failures = 0
+    total_failures = 0
+    max_total_failures = 10
 
     log(account_id, f"开始下注，目标 {target_bets} 次")
 
     while completed < target_bets and not STOP_FLAG:
+        if total_failures >= max_total_failures:
+            log(account_id, f"累计失败 {total_failures} 次，放弃下注，等待第二轮重试")
+            return False
+
         if consecutive_failures >= 5:
             log(account_id, f"连续失败 {consecutive_failures} 次，刷新页面...")
             popup_handler.enabled = False
@@ -826,8 +832,9 @@ async def run_betting_loop(
             log(account_id, f"已完成 {completed}/{target_bets} 次下注")
         else:
             consecutive_failures += 1
+            total_failures += 1
             log(account_id,
-                f"下注失败（连续失败: {consecutive_failures}），等待后重试...")
+                f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}），等待后重试...")
             await asyncio.sleep(5)
 
     if STOP_FLAG:
