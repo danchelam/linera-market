@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.23.1"
+__version__ = "2026.03.23.2"
 
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
@@ -208,8 +208,10 @@ def try_auto_update():
     LAST_BASE_VERSION = read_local_version(base_path)
     LAST_UPDATE_STATUS = "updated" if updated else "up_to_date"
 
-    # runner 自更新
-    if UPDATE_RUNNER_URL and LAST_REMOTE_RUNNER_VERSION:
+    # runner 自更新（仅非 frozen 模式，exe 包内的 runner 无法热替换）
+    if getattr(sys, 'frozen', False):
+        print(f"【更新】linera_runner (exe 模式) 跳过自更新: {__version__}")
+    elif UPDATE_RUNNER_URL and LAST_REMOTE_RUNNER_VERSION:
         runner_path = os.path.abspath(__file__)
         local_runner_ver = __version__
         if parse_version(LAST_REMOTE_RUNNER_VERSION) > parse_version(local_runner_ver):
