@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.4"
+__version__ = "2026.03.23.5"
 
 import asyncio
 import random
@@ -439,7 +439,7 @@ async def login(
 
         if need_full_connect:
             okx_selected = False
-            for connect_try in range(3):
+            for connect_try in range(5):
                 connect_btn = page.locator("button:has-text('Connect Wallet')")
                 if await connect_btn.count() == 0:
                     okx_selected = True
@@ -447,10 +447,10 @@ async def login(
 
                 log(account_id, f"检测到 Connect Wallet 按钮，开始连接...（第 {connect_try+1} 次）")
                 await connect_btn.first.click(timeout=5000)
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
 
                 okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
-                for _ in range(20):
+                for _ in range(30):
                     if await okx_option.count() > 0:
                         break
                     await asyncio.sleep(0.5)
@@ -474,13 +474,13 @@ async def login(
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(1)
                 try:
-                    await page.reload(wait_until="domcontentloaded", timeout=20000)
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
                 except Exception:
                     pass
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
 
             if not okx_selected:
-                log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
+                log(account_id, "5 次尝试后仍未找到 OKX Wallet，跳过此账号")
                 return False
 
             # ── 首次连接：处理钱包弹窗（解锁/连接） ──
