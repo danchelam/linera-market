@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.21.1"
+__version__ = "2026.03.23.1"
 
 import asyncio
 import random
@@ -34,7 +34,74 @@ from base_module import (
 DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
 TARGET_BETS = 15
-BET_AMOUNT = "1"
+
+
+# ════════════════════════════════════════════════════════
+#  工具：RPC 恢复等待
+# ════════════════════════════════════════════════════════
+
+FATAL_ERROR_SEL = "span.text-danger"
+FATAL_ERROR_TEXT = "An issue was detected"
+CLAIMING_CHAIN_SEL = "span:text-is('Claiming chain...')"
+
+
+async def is_fatal_error(page: Page) -> bool:
+    """检测不可恢复的 RPC 错误"""
+    try:
+        loc = page.locator(FATAL_ERROR_SEL)
+        if await loc.count() > 0:
+            text = await loc.first.inner_text(timeout=2000)
+            if FATAL_ERROR_TEXT in text:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def wait_rpc_recovery(
+    page: Page, account_id: str,
+    max_wait: int = 120, max_refresh: int = 3,
+) -> bool:
+    """
+    页面跳转后等待 RPC 恢复。
+    - Claiming chain... → 等最多 max_wait 秒
+    - 超时 → 刷新页面重试（最多 max_refresh 次）
+    - "An issue was detected..." → 不可恢复，返回 False
+    返回 True 表示恢复正常，False 表示不可恢复需跳过。
+    """
+    for refresh_round in range(max_refresh + 1):
+        if await is_fatal_error(page):
+            log(account_id, "检测到 RPC 致命错误（local site storage），跳过该窗口")
+            return False
+
+        claiming = page.locator(CLAIMING_CHAIN_SEL)
+        if await claiming.count() == 0:
+            return True
+
+        log(account_id, f"检测到 Claiming chain...，等待恢复（第 {refresh_round + 1} 轮，最长 {max_wait}s）")
+        for tick in range(max_wait):
+            if STOP_FLAG:
+                return False
+            if await is_fatal_error(page):
+                log(account_id, "等待中检测到 RPC 致命错误，跳过该窗口")
+                return False
+            if await claiming.count() == 0:
+                log(account_id, "RPC 恢复正常")
+                return True
+            await asyncio.sleep(1)
+
+        if refresh_round < max_refresh:
+            log(account_id, f"Claiming chain 等待 {max_wait}s 超时，刷新页面重试...")
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        else:
+            log(account_id, f"刷新 {max_refresh} 次后仍未恢复，跳过该窗口")
+            return False
+
+    return False
 
 
 # ════════════════════════════════════════════════════════
@@ -327,142 +394,26 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
 
 
 # ════════════════════════════════════════════════════════
-#  设置下注金额（SAVE 后持久化，只需一次）
-# ════════════════════════════════════════════════════════
-
-async def set_bet_amount(page: Page, account_id: str, amount: str) -> bool:
-    # 点击金额按钮 — 多种方式尝试
-    clicked = False
-
-    # 方法1: Playwright 点击包含 Currency 图标的区域
-    try:
-        currency_img = page.locator("img[alt='Currency']")
-        if await currency_img.count() > 0:
-            parent = currency_img.locator("..")
-            await parent.first.click(timeout=3000)
-            clicked = True
-            log(account_id, "已点击金额按钮 (Currency 父元素)")
-    except Exception:
-        pass
-
-    # 方法2: 点击金额显示文本（通常在 HIGHER/LOWER 按钮上方）
-    if not clicked:
-        try:
-            amt_display = page.locator("div.rounded-full:has(img[alt='Currency'])")
-            if await amt_display.count() > 0:
-                await amt_display.first.click(timeout=3000)
-                clicked = True
-                log(account_id, "已点击金额按钮 (rounded-full)")
-        except Exception:
-            pass
-
-    # 方法3: JS 强制点击 + dispatchEvent
-    if not clicked:
-        try:
-            ok = await page.evaluate("""() => {
-                const img = document.querySelector('img[alt="Currency"]');
-                if (!img) return false;
-                let el = img.closest('[role="button"]') || img.parentElement;
-                for (let i = 0; i < 5 && el; i++) {
-                    el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                    if (el.tagName === 'BUTTON') break;
-                    el = el.parentElement;
-                }
-                return true;
-            }""")
-            if ok:
-                clicked = True
-                log(account_id, "已点击金额按钮 (JS dispatchEvent)")
-        except Exception:
-            pass
-
-    if not clicked:
-        log(account_id, "未找到金额按钮")
-        return False
-
-    await asyncio.sleep(1.5)
-
-    # 等待输入框出现
-    input_loc = page.locator("input[inputmode='decimal']")
-    for _ in range(10):
-        if await input_loc.count() > 0 and await input_loc.first.is_visible():
-            break
-        await asyncio.sleep(0.5)
-    else:
-        log(account_id, "金额输入框未出现")
-        await page.keyboard.press("Escape")
-        return False
-
-    # 填写金额
-    try:
-        target = input_loc.first
-        await target.click(click_count=3, timeout=2000)
-        await asyncio.sleep(0.2)
-        await target.fill(amount)
-        current = await target.input_value()
-        if current != amount:
-            await page.evaluate("""(amount) => {
-                const inp = document.querySelector('input[inputmode="decimal"]');
-                if (!inp) return;
-                const setter = Object.getOwnPropertyDescriptor(
-                    HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, amount);
-                inp.dispatchEvent(new Event('input', {bubbles: true}));
-                inp.dispatchEvent(new Event('change', {bubbles: true}));
-            }""", amount)
-        log(account_id, f"金额已填写: {amount}")
-    except Exception as e:
-        log(account_id, f"填写金额失败: {e}")
-        await page.keyboard.press("Escape")
-        return False
-
-    # 点击 SAVE
-    await asyncio.sleep(0.5)
-    try:
-        save_btn = page.locator("button:has-text('SAVE')")
-        if await save_btn.count() > 0:
-            await save_btn.first.click(timeout=3000)
-            log(account_id, "已点击 SAVE，金额保存成功")
-            await asyncio.sleep(1)
-        else:
-            log(account_id, "未找到 SAVE 按钮")
-            await page.keyboard.press("Escape")
-            return False
-    except Exception as e:
-        log(account_id, f"点击 SAVE 失败: {e}")
-        await page.keyboard.press("Escape")
-        return False
-
-    # 确认弹窗已关闭
-    for _ in range(10):
-        if await page.locator("div[data-slot='wrapper']").count() == 0:
-            break
-        await asyncio.sleep(0.5)
-    return True
-
-
-# ════════════════════════════════════════════════════════
 #  登录流程（禁用后台 handler，手动处理弹窗）
 # ════════════════════════════════════════════════════════
 
 async def login(
     page: Page, context: BrowserContext, account_id: str,
-    popup_handler: WalletPopupHandler, bet_amount: str,
+    popup_handler: WalletPopupHandler,
 ) -> bool:
     """
-    初始化：打开网站 → 手动处理钱包签名 → 选 1 minute → 设金额
+    初始化：打开 History 页面 → 钱包解锁/签名 → 读 Trades 基线
     登录期间禁用后台 handler 避免冲突。
     """
-    # 禁用后台处理器，防止抢弹窗
     popup_handler.enabled = False
 
     try:
-        market = random.choice(MARKETS)
-        url = f"{DAPP_URL}/?market={market}"
+        # 直接进 History 页面（同时触发钱包连接 + 读取基线）
+        history_url = f"{DAPP_URL}/history?market=BTC&duration=1"
 
         for attempt in range(3):
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.goto(history_url, wait_until="domcontentloaded", timeout=30000)
                 break
             except Exception as e:
                 if attempt < 2:
@@ -472,7 +423,7 @@ async def login(
                     log(account_id, f"导航彻底失败: {e}")
                     return False
 
-        log(account_id, "页面已打开，等待加载...")
+        log(account_id, "History 页面已打开，等待加载...")
         await asyncio.sleep(8)
 
         # ── 检测是否需要 Connect Wallet（带重试） ──
@@ -659,42 +610,18 @@ async def login(
 
         await asyncio.sleep(2)
 
-        # 选择 1 minute 市场
-        await select_1_minute(page, account_id)
+        # ── 在 History 页面读取 Trades 基线 ──
+        initial_trades = await get_trades_count(page, account_id)
+        if initial_trades >= 0:
+            log(account_id, f"登录完成，Trades 基线: {initial_trades}")
+        else:
+            log(account_id, "登录完成，无法读取 Trades 基线")
+            initial_trades = -1
 
-        # 处理选择市场可能触发的钱包弹窗
-        await asyncio.sleep(2)
-        handled = await handle_wallet_popups_manual(context, account_id, timeout=5)
-        if handled:
-            log(account_id, "市场切换后的钱包弹窗已处理")
-            await asyncio.sleep(2)
-
-        # 设置下注金额（最多重试 3 次）
-        for amt_try in range(3):
-            if await set_bet_amount(page, account_id, bet_amount):
-                break
-            if amt_try < 2:
-                log(account_id, f"金额设置失败，重试 ({amt_try+1}/3)...")
-                await asyncio.sleep(2)
-            else:
-                log(account_id, "金额设置多次失败，使用默认金额继续")
-
-        # 验证按钮可用
-        for i in range(10):
-            try:
-                higher = page.locator("button.btn-higher")
-                if await higher.count() > 0:
-                    if await higher.get_attribute("disabled") is None:
-                        log(account_id, "初始化完成，按钮已激活")
-                        return True
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-
-        log(account_id, "按钮状态未确认，尝试继续...")
+        # 存入 page 对象供后续使用
+        page._initial_trades = initial_trades
         return True
     finally:
-        # 重新启用后台处理器
         popup_handler.enabled = True
 
 
@@ -719,26 +646,30 @@ async def place_single_bet(
     5. 等待成功标志确认
     """
 
-    # 0. 检测页面是否卡住
+    # 0. 检测 RPC 致命错误
+    if await is_fatal_error(page):
+        log(account_id, "检测到 RPC 致命错误，跳过该窗口")
+        return False
+
+    # 0.5 检测页面是否卡住
     if await is_page_stuck(page):
         recovered = await recover_from_stuck(page, account_id)
         if not recovered:
             return False
-        await select_1_minute(page, account_id)
 
-    # 1. 检查池子余额
+    # 1. 检查池子余额（仅在余额为 0 时才切换市场）
     balance = await get_pool_balance(page)
     if balance in ("0", "0.00", "0.000", ""):
         log(account_id, f"池子余额为 '{balance}'，切换市场...")
         for m in random.sample(MARKETS, len(MARKETS)):
             await switch_market(page, account_id, m)
             await asyncio.sleep(2)
+            if not await wait_rpc_recovery(page, account_id):
+                return False
             new_bal = await get_pool_balance(page)
             if new_bal not in ("0", "0.00", "0.000", ""):
                 log(account_id, f"{m} 池子余额: {new_bal}")
                 break
-    elif bet_number % 3 == 1:
-        await switch_market(page, account_id, random.choice(MARKETS))
 
     # 2. 等待结算完成
     await wait_settlement_done(page, account_id)
@@ -808,7 +739,6 @@ async def run_betting_loop(
     account_id: str,
     popup_handler: WalletPopupHandler,
     target_bets: int = TARGET_BETS,
-    bet_amount: str = BET_AMOUNT,
 ) -> bool:
     completed = 0
     consecutive_failures = 0
@@ -824,8 +754,10 @@ async def run_betting_loop(
             except Exception:
                 pass
             await asyncio.sleep(5)
+            if not await wait_rpc_recovery(page, account_id):
+                popup_handler.enabled = True
+                return False
             await handle_wallet_popups_manual(context, account_id, timeout=15)
-            await select_1_minute(page, account_id)
             await asyncio.sleep(3)
             popup_handler.enabled = True
             consecutive_failures = 0
@@ -1061,35 +993,50 @@ async def linera_task(
     **kwargs,
 ) -> bool:
     target_bets = kwargs.get("target_bets", TARGET_BETS)
-    bet_amount = str(kwargs.get("bet_amount", BET_AMOUNT))
 
-    if not await login(page, context, account_id, popup_handler, bet_amount):
+    # ── Step 1: 登录（在 History 页面完成解锁 + 读基线） ──
+    if not await login(page, context, account_id, popup_handler):
         log(account_id, "登录失败")
         return False
 
-    # ── 下注前读取 Trades 基线（通过 History 页面） ──
-    initial_trades = -1
-    if await navigate_to_history(page, account_id):
-        initial_trades = await get_trades_count(page, account_id)
-        await navigate_back_to_market(page, account_id)
-        await select_1_minute(page, account_id)
-        await asyncio.sleep(2)
-
+    initial_trades = getattr(page, '_initial_trades', -1)
     if initial_trades >= 0:
         log(account_id, f"下注前 Trades: {initial_trades}，目标: {initial_trades + target_bets}")
 
-    # ── 第一轮下注 ──
+    # ── Step 2: 导航到市场页面 ──
+    market = random.choice(MARKETS)
+    market_url = f"{DAPP_URL}/?market={market}&duration=1"
+    for nav_try in range(3):
+        try:
+            await page.goto(market_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+            break
+        except Exception as e:
+            if nav_try < 2:
+                log(account_id, f"导航到市场失败，重试 ({nav_try+1}/3)...")
+                await asyncio.sleep(3)
+            else:
+                log(account_id, f"导航到市场彻底失败: {e}")
+                return False
+
+    if not await wait_rpc_recovery(page, account_id):
+        return False
+
+    await select_1_minute(page, account_id)
+    log(account_id, "初始化完成，开始下注")
+
+    # ── Step 3: 第一轮下注 ──
     bet_ok = await run_betting_loop(
-        page, context, account_id, popup_handler, target_bets, bet_amount,
+        page, context, account_id, popup_handler, target_bets,
     )
 
     if not bet_ok:
         return False
 
-    # ── 先校验 History 笔数是否达到目标，不足则补跑（此阶段不上传） ──
+    # ── Step 4: 校验 History 笔数，不足则补跑 ──
     if initial_trades >= 0:
         target_total = initial_trades + target_bets
-        for _ in range(2):
+        for verify_round in range(2):
             if not await navigate_to_history(page, account_id):
                 log(account_id, "无法导航到 History，跳过校验")
                 break
@@ -1107,17 +1054,20 @@ async def linera_task(
             log(account_id, f"Trades 不足: {final_trades}/{target_total}，还差 {shortfall} 次，补跑中...")
             if not await navigate_back_to_market(page, account_id):
                 break
+            await asyncio.sleep(3)
+            if not await wait_rpc_recovery(page, account_id):
+                return False
             await select_1_minute(page, account_id)
             await asyncio.sleep(2)
 
             extra_ok = await run_betting_loop(
-                page, context, account_id, popup_handler, shortfall, bet_amount,
+                page, context, account_id, popup_handler, shortfall,
             )
             if not extra_ok:
                 log(account_id, "补跑失败")
                 break
 
-        # 上传前最后一次确认（避免补跑后仍不足）
+        # 上传前最后确认
         if not await navigate_to_history(page, account_id):
             log(account_id, "上传前无法进入 History，中止上传")
             return False
@@ -1131,9 +1081,9 @@ async def linera_task(
             return False
         log(account_id, f"笔数已达标，开始上传：Trades {final_trades} >= {target_total}")
     else:
-        log(account_id, "无下注前 Trades 基线，跳过上传前校验")
+        log(account_id, "无 Trades 基线，跳过上传前校验")
 
-    # ── 校验通过后再上传 ──
+    # ── Step 5: 上传 ──
     await upload_trades(page, context, account_id)
 
     return True
