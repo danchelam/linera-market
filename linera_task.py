@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.9"
+__version__ = "2026.03.23.10"
 
 import asyncio
 import random
@@ -34,6 +34,9 @@ from base_module import (
 DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
 TARGET_BETS = 15
+
+# 跨轮次进度记忆：account_id → 目标 Trades 总数（首次设置后不再变更）
+ACCOUNT_TARGET_TRADES: dict[str, int] = {}
 
 
 def _is_wallet_popup(url: str) -> bool:
@@ -1238,8 +1241,26 @@ async def linera_task(
         return False
 
     initial_trades = getattr(page, '_initial_trades', -1)
+
+    # ── 跨轮次进度继承 ──
     if initial_trades >= 0:
-        log(account_id, f"下注前 Trades: {initial_trades}，目标: {initial_trades + target_bets}")
+        if account_id in ACCOUNT_TARGET_TRADES:
+            target_total = ACCOUNT_TARGET_TRADES[account_id]
+            remaining = target_total - initial_trades
+            if remaining <= 0:
+                log(account_id, f"Trades 已达标: {initial_trades} >= {target_total}（上轮进度继承），跳过下注")
+                # 直接跳到上传 + claim
+                await upload_trades(page, context, account_id)
+                await claim_quest(page, context, account_id, popup_handler)
+                return True
+            log(account_id, f"继承上轮进度: 当前 {initial_trades}，目标 {target_total}，还需 {remaining} 次")
+            target_bets = remaining
+        else:
+            target_total = initial_trades + target_bets
+            ACCOUNT_TARGET_TRADES[account_id] = target_total
+            log(account_id, f"首次运行: Trades {initial_trades}，目标 {target_total}")
+    else:
+        target_total = -1
 
     # ── Step 2: 导航到市场页面 ──
     market = random.choice(MARKETS)
@@ -1261,9 +1282,9 @@ async def linera_task(
         return False
 
     await select_1_minute(page, account_id)
-    log(account_id, "初始化完成，开始下注")
+    log(account_id, f"初始化完成，开始下注（目标 {target_bets} 次）")
 
-    # ── Step 3: 第一轮下注 ──
+    # ── Step 3: 下注 ──
     bet_ok = await run_betting_loop(
         page, context, account_id, popup_handler, target_bets,
     )
@@ -1272,8 +1293,7 @@ async def linera_task(
         return False
 
     # ── Step 4: 校验 History 笔数，不足则补跑 ──
-    if initial_trades >= 0:
-        target_total = initial_trades + target_bets
+    if target_total >= 0:
         for verify_round in range(2):
             if not await navigate_to_history(page, account_id):
                 log(account_id, "无法导航到 History，跳过校验")
