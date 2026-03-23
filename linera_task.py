@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.16"
+__version__ = "2026.03.23.17"
 
 import asyncio
 import random
@@ -531,6 +531,7 @@ async def login(
             need_full_connect = True
 
         if need_full_connect:
+            popup_handler.enabled = False
             okx_selected = False
             for connect_try in range(5):
                 connect_btn = page.locator("button:has-text('Connect Wallet')")
@@ -543,10 +544,52 @@ async def login(
                 await asyncio.sleep(3)
 
                 okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
+                wallet_appeared = False
                 for _ in range(30):
                     if await okx_option.count() > 0:
                         break
+                    # 检查是否直接弹出了钱包弹窗（跳过选择列表）
+                    for p in context.pages:
+                        try:
+                            if _is_wallet_popup(p.url or ""):
+                                wallet_appeared = True
+                                break
+                        except Exception:
+                            continue
+                    if wallet_appeared:
+                        break
                     await asyncio.sleep(0.5)
+
+                if wallet_appeared:
+                    log(account_id, "Connect Wallet 后直接弹出钱包弹窗，跳过选择列表")
+                    # 立即处理该弹窗
+                    for p in context.pages:
+                        try:
+                            if _is_wallet_popup(p.url or ""):
+                                await p.wait_for_load_state("domcontentloaded", timeout=5000)
+                                await asyncio.sleep(2)
+                                has_pwd = False
+                                for frame in p.frames:
+                                    try:
+                                        if await frame.locator('input[type="password"]').count() > 0:
+                                            has_pwd = True
+                                            break
+                                    except Exception:
+                                        continue
+                                if has_pwd:
+                                    await _find_and_fill_password(p, context, account_id, OKX_DEFAULT_PASSWORD)
+                                    await asyncio.sleep(0.5)
+                                    await _click_unlock_button(p, context, account_id)
+                                    log(account_id, "弹窗钱包解锁完成")
+                                else:
+                                    await _click_wallet_button(p, account_id)
+                                    log(account_id, "弹窗已确认")
+                                await asyncio.sleep(3)
+                                break
+                        except Exception:
+                            continue
+                    okx_selected = True
+                    break
 
                 if await okx_option.count() > 0:
                     await okx_option.first.click(timeout=5000)
@@ -572,6 +615,7 @@ async def login(
                     pass
                 await asyncio.sleep(8)
 
+            popup_handler.enabled = True
             if not okx_selected:
                 log(account_id, "5 次尝试后仍未找到 OKX Wallet，跳过此账号")
                 return False
