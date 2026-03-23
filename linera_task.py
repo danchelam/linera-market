@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.19"
+__version__ = "2026.03.24.1"
 
 import asyncio
 import random
@@ -973,7 +973,7 @@ async def run_betting_loop(
             completed += 1
             consecutive_failures = 0
             log(account_id, f"已完成 {completed}/{target_bets} 次下注")
-            _update_status(account_id, bets_completed=completed)
+            _update_status(account_id, bets_completed=completed, error="")
         else:
             consecutive_failures += 1
             total_failures += 1
