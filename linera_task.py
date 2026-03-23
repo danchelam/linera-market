@@ -10,11 +10,13 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.15"
+__version__ = "2026.03.23.16"
 
 import asyncio
 import random
 import sys
+import os
+import json as _json
 from datetime import datetime
 
 from playwright.async_api import Page, BrowserContext
@@ -36,8 +38,30 @@ DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
 TARGET_BETS = 16
 
-# 跨轮次进度记忆：account_id → 目标 Trades 总数（首次设置后不再变更）
+# 跨轮次进度记忆：account_id → 目标 Trades 总数（持久化到文件，跨重启继承）
 ACCOUNT_TARGET_TRADES: dict[str, int] = {}
+_TARGET_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "account_targets.json")
+
+
+def _load_target_trades():
+    global ACCOUNT_TARGET_TRADES
+    if os.path.exists(_TARGET_TRADES_FILE):
+        try:
+            with open(_TARGET_TRADES_FILE, "r", encoding="utf-8") as f:
+                ACCOUNT_TARGET_TRADES = _json.load(f)
+        except Exception:
+            pass
+
+
+def _save_target_trades():
+    try:
+        with open(_TARGET_TRADES_FILE, "w", encoding="utf-8") as f:
+            _json.dump(ACCOUNT_TARGET_TRADES, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+_load_target_trades()
 
 # 实时状态追踪：account_id → 状态字典（供 Web 前端展示）
 TASK_STATUS: dict[str, dict] = {}
@@ -1340,6 +1364,7 @@ async def linera_task(
         else:
             target_total = initial_trades + target_bets
             ACCOUNT_TARGET_TRADES[account_id] = target_total
+            _save_target_trades()
             log(account_id, f"首次运行: Trades {initial_trades}，目标 {target_total}")
     else:
         target_total = -1
