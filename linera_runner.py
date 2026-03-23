@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.23.13"
+__version__ = "2026.03.23.14"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -470,4 +470,4 @@ if __name__ == '__main__':
         webbrowser.open(f"http://127.0.0.1:{port}")
     threading.Thread(target=open_browser, daemon=True).start()
 
-    socketio.run(app, debug=False, port=port, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", debug=False, port=port, allow_unsafe_werkzeug=True)
