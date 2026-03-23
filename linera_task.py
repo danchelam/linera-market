@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.17"
+__version__ = "2026.03.23.18"
 
 import asyncio
 import random
@@ -91,6 +91,7 @@ def _is_wallet_popup(url: str) -> bool:
 
 FATAL_ERROR_SEL = "span.text-danger"
 FATAL_ERROR_TEXT = "An issue was detected"
+CONNECTION_FAILED_TEXT = "Connection failed"
 CLAIMING_CHAIN_SEL = "span:text-is('Claiming chain...')"
 
 
@@ -107,14 +108,24 @@ async def is_fatal_error(page: Page) -> bool:
     return False
 
 
+async def is_connection_failed(page: Page) -> bool:
+    """检测 Connection failed 错误"""
+    try:
+        loc = page.locator("span.text-danger:has-text('Connection failed')")
+        return await loc.count() > 0
+    except Exception:
+        return False
+
+
 async def wait_rpc_recovery(
     page: Page, account_id: str,
+    context: BrowserContext = None,
     max_wait: int = 120, max_refresh: int = 3,
 ) -> bool:
     """
     页面跳转后等待 RPC 恢复。
-    - Claiming chain... → 等最多 max_wait 秒
-    - 超时 → 刷新页面重试（最多 max_refresh 次）
+    - Claiming chain... → 等最多 max_wait 秒，同时处理钱包弹窗
+    - Connection failed → 刷新页面（最多 3 次，间隔 60s）
     - "An issue was detected..." → 不可恢复，返回 False
     返回 True 表示恢复正常，False 表示不可恢复需跳过。
     """
@@ -122,6 +133,21 @@ async def wait_rpc_recovery(
         if await is_fatal_error(page):
             log(account_id, "检测到 RPC 致命错误（local site storage），跳过该窗口")
             return False
+
+        # 检查 Connection failed
+        if await is_connection_failed(page):
+            if refresh_round < max_refresh:
+                log(account_id, f"检测到 Connection failed，60s 后刷新（第 {refresh_round+1}/{max_refresh} 次）")
+                await asyncio.sleep(60)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+                continue
+            else:
+                log(account_id, f"Connection failed 刷新 {max_refresh} 次后仍未恢复，跳过")
+                return False
 
         claiming = page.locator(CLAIMING_CHAIN_SEL)
         if await claiming.count() == 0:
@@ -134,13 +160,40 @@ async def wait_rpc_recovery(
             if await is_fatal_error(page):
                 log(account_id, "等待中检测到 RPC 致命错误，跳过该窗口")
                 return False
+
+            # Claiming chain 期间处理钱包弹窗
+            if context:
+                for p in context.pages:
+                    try:
+                        if _is_wallet_popup(p.url or ""):
+                            log(account_id, f"Claiming 期间发现钱包弹窗: {p.url[-60:]}")
+                            try:
+                                await p.wait_for_load_state("domcontentloaded", timeout=5000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2)
+                            await _click_wallet_button(p, account_id)
+                            log(account_id, "Claiming 期间弹窗已确认")
+                            await asyncio.sleep(2)
+                    except Exception:
+                        continue
+
             if await claiming.count() == 0:
+                # 恢复后检查是否变成了 Connection failed
+                if await is_connection_failed(page):
+                    log(account_id, "Claiming 结束后出现 Connection failed")
+                    break
                 log(account_id, "RPC 恢复正常")
                 return True
             await asyncio.sleep(1)
 
+        # Claiming 超时或 Connection failed，刷新重试
         if refresh_round < max_refresh:
-            log(account_id, f"Claiming chain 等待 {max_wait}s 超时，刷新页面重试...")
+            if await is_connection_failed(page):
+                log(account_id, f"Connection failed，60s 后刷新（第 {refresh_round+1}/{max_refresh} 次）")
+                await asyncio.sleep(60)
+            else:
+                log(account_id, f"Claiming chain 等待 {max_wait}s 超时，刷新页面重试...")
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=30000)
             except Exception:
@@ -806,7 +859,7 @@ async def place_single_bet(
         for m in random.sample(MARKETS, len(MARKETS)):
             await switch_market(page, account_id, m)
             await asyncio.sleep(2)
-            if not await wait_rpc_recovery(page, account_id):
+            if not await wait_rpc_recovery(page, account_id, context):
                 return False
             new_bal = await get_pool_balance(page)
             if new_bal not in ("0", "0.00", "0.000", ""):
@@ -904,7 +957,7 @@ async def run_betting_loop(
             except Exception:
                 pass
             await asyncio.sleep(5)
-            if not await wait_rpc_recovery(page, account_id):
+            if not await wait_rpc_recovery(page, account_id, context):
                 popup_handler.enabled = True
                 return False
             await handle_wallet_popups_manual(context, account_id, timeout=15)
@@ -1433,7 +1486,7 @@ async def linera_task(
                 _update_status(account_id, status="failed", error="导航到市场失败")
                 return False
 
-    if not await wait_rpc_recovery(page, account_id):
+    if not await wait_rpc_recovery(page, account_id, context):
         return False
 
     await select_1_minute(page, account_id)
@@ -1470,7 +1523,7 @@ async def linera_task(
             if not await navigate_back_to_market(page, account_id):
                 break
             await asyncio.sleep(3)
-            if not await wait_rpc_recovery(page, account_id):
+            if not await wait_rpc_recovery(page, account_id, context):
                 return False
             await select_1_minute(page, account_id)
             await asyncio.sleep(2)
