@@ -9,9 +9,9 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.23.11"
+__version__ = "2026.03.23.12"
 
-from flask import Flask, render_template
+from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
 import subprocess
 import threading
@@ -428,6 +428,29 @@ def handle_shutdown_server():
         time.sleep(1)
         os._exit(0)
     threading.Thread(target=kill, daemon=True).start()
+
+
+# ═══════════════════════════════════════════════
+#  任务状态 API + 实时推送
+# ═══════════════════════════════════════════════
+
+@app.route('/api/tasks')
+def api_tasks():
+    if task_module and hasattr(task_module, 'TASK_STATUS'):
+        return jsonify(list(task_module.TASK_STATUS.values()))
+    return jsonify([])
+
+
+def _task_status_pusher():
+    """后台线程：每 2 秒向前端推送一次任务状态"""
+    while True:
+        socketio.sleep(2)
+        if is_task_running and task_module and hasattr(task_module, 'TASK_STATUS'):
+            data = list(task_module.TASK_STATUS.values())
+            socketio.emit('task_status_update', data)
+
+
+socketio.start_background_task(_task_status_pusher)
 
 
 # ═══════════════════════════════════════════════

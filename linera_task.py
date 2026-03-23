@@ -10,11 +10,12 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.11"
+__version__ = "2026.03.23.12"
 
 import asyncio
 import random
 import sys
+from datetime import datetime
 
 from playwright.async_api import Page, BrowserContext
 
@@ -37,6 +38,22 @@ TARGET_BETS = 16
 
 # 跨轮次进度记忆：account_id → 目标 Trades 总数（首次设置后不再变更）
 ACCOUNT_TARGET_TRADES: dict[str, int] = {}
+
+# 实时状态追踪：account_id → 状态字典（供 Web 前端展示）
+TASK_STATUS: dict[str, dict] = {}
+
+
+def _update_status(account_id: str, **fields):
+    """更新账号的实时运行状态"""
+    if account_id not in TASK_STATUS:
+        TASK_STATUS[account_id] = {
+            "name": account_id, "status": "waiting",
+            "initial_trades": -1, "target_trades": -1,
+            "current_trades": -1, "bets_completed": 0,
+            "bets_target": 0, "round": 0, "error": "", "updated_at": "",
+        }
+    TASK_STATUS[account_id].update(fields)
+    TASK_STATUS[account_id]["updated_at"] = datetime.now().strftime("%H:%M:%S")
 
 
 def _is_wallet_popup(url: str) -> bool:
@@ -803,10 +820,12 @@ async def run_betting_loop(
     max_total_failures = 10
 
     log(account_id, f"开始下注，目标 {target_bets} 次")
+    _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
     while completed < target_bets and not STOP_FLAG:
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注，等待第二轮重试")
+            _update_status(account_id, status="failed", error=f"累计失败{total_failures}次")
             return False
 
         if consecutive_failures >= 5:
@@ -833,11 +852,13 @@ async def run_betting_loop(
             completed += 1
             consecutive_failures = 0
             log(account_id, f"已完成 {completed}/{target_bets} 次下注")
+            _update_status(account_id, bets_completed=completed)
         else:
             consecutive_failures += 1
             total_failures += 1
             log(account_id,
                 f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}），等待后重试...")
+            _update_status(account_id, error=f"连续失败{consecutive_failures}次")
             await asyncio.sleep(5)
 
     if STOP_FLAG:
@@ -1234,10 +1255,13 @@ async def linera_task(
     **kwargs,
 ) -> bool:
     target_bets = kwargs.get("target_bets", TARGET_BETS)
+    current_round = TASK_STATUS.get(account_id, {}).get("round", 0) + 1
+    _update_status(account_id, status="logging_in", round=current_round, error="")
 
     # ── Step 1: 登录（在 History 页面完成解锁 + 读基线） ──
     if not await login(page, context, account_id, popup_handler):
         log(account_id, "登录失败")
+        _update_status(account_id, status="failed", error="登录失败")
         return False
 
     initial_trades = getattr(page, '_initial_trades', -1)
@@ -1249,9 +1273,13 @@ async def linera_task(
             remaining = target_total - initial_trades
             if remaining <= 0:
                 log(account_id, f"Trades 已达标: {initial_trades} >= {target_total}（上轮进度继承），跳过下注")
-                # 直接跳到上传 + claim
+                _update_status(account_id, status="uploading",
+                               initial_trades=initial_trades, target_trades=target_total,
+                               current_trades=initial_trades, bets_completed=0, bets_target=0)
                 await upload_trades(page, context, account_id)
+                _update_status(account_id, status="claiming")
                 await claim_quest(page, context, account_id, popup_handler)
+                _update_status(account_id, status="done")
                 return True
             log(account_id, f"继承上轮进度: 当前 {initial_trades}，目标 {target_total}，还需 {remaining} 次")
             target_bets = remaining
@@ -1261,6 +1289,9 @@ async def linera_task(
             log(account_id, f"首次运行: Trades {initial_trades}，目标 {target_total}")
     else:
         target_total = -1
+
+    _update_status(account_id, status="logged_in",
+                   initial_trades=initial_trades, target_trades=target_total)
 
     # ── Step 2: 导航到市场页面 ──
     market = random.choice(MARKETS)
@@ -1276,6 +1307,7 @@ async def linera_task(
                 await asyncio.sleep(3)
             else:
                 log(account_id, f"导航到市场彻底失败: {e}")
+                _update_status(account_id, status="failed", error="导航到市场失败")
                 return False
 
     if not await wait_rpc_recovery(page, account_id):
@@ -1293,6 +1325,7 @@ async def linera_task(
         return False
 
     # ── Step 4: 校验 History 笔数，不足则补跑 ──
+    _update_status(account_id, status="verifying")
     if target_total >= 0:
         for verify_round in range(2):
             if not await navigate_to_history(page, account_id):
@@ -1305,6 +1338,7 @@ async def linera_task(
                 break
 
             shortfall = target_total - final_trades
+            _update_status(account_id, current_trades=final_trades)
             if shortfall <= 0:
                 log(account_id, f"Trades 校验通过: {final_trades} >= {target_total}")
                 break
@@ -1336,17 +1370,21 @@ async def linera_task(
             return False
         if final_trades < target_total:
             log(account_id, f"Trades 仍不足 ({final_trades}/{target_total})，跳过上传")
+            _update_status(account_id, status="failed", error=f"Trades不足 {final_trades}/{target_total}")
             return False
         log(account_id, f"笔数已达标，开始上传：Trades {final_trades} >= {target_total}")
     else:
         log(account_id, "无 Trades 基线，跳过上传前校验")
 
     # ── Step 5: 上传 ──
+    _update_status(account_id, status="uploading")
     await upload_trades(page, context, account_id)
 
     # ── Step 6: Claim Quest ──
+    _update_status(account_id, status="claiming")
     await claim_quest(page, context, account_id, popup_handler)
 
+    _update_status(account_id, status="done")
     return True
 
 
