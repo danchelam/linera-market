@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.1"
+__version__ = "2026.03.24.2"
 
 import asyncio
 import random
@@ -1432,6 +1432,21 @@ async def linera_task(
     target_bets = kwargs.get("target_bets", TARGET_BETS)
     current_round = TASK_STATUS.get(account_id, {}).get("round", 0) + 1
     _update_status(account_id, status="logging_in", round=current_round, error="")
+    result = await _linera_task_inner(page, context, account_id, popup_handler, target_bets)
+    if not result:
+        cur = TASK_STATUS.get(account_id, {})
+        if cur.get("status") not in ("done", "failed"):
+            _update_status(account_id, status="failed", error=cur.get("error") or "任务异常退出")
+    return result
+
+
+async def _linera_task_inner(
+    page: Page,
+    context: BrowserContext,
+    account_id: str,
+    popup_handler: WalletPopupHandler,
+    target_bets: int,
+) -> bool:
 
     # ── Step 1: 登录（在 History 页面完成解锁 + 读基线） ──
     if not await login(page, context, account_id, popup_handler):
