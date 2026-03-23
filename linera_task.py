@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.23.12"
+__version__ = "2026.03.23.13"
 
 import asyncio
 import random
@@ -1135,29 +1135,53 @@ async def claim_quest(
                 return False
         await asyncio.sleep(3)
 
-        # 选择 OKX Wallet
-        okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
-        for _ in range(20):
-            if await okx_option.count() > 0:
-                break
-            await asyncio.sleep(0.5)
-
-        if await okx_option.count() > 0:
-            await okx_option.first.click(timeout=5000)
-            log(account_id, "已选择 OKX Wallet (Portal)")
-            await asyncio.sleep(3)
-        else:
+        # 选择 OKX Wallet（重试直到弹窗出现）
+        okx_clicked = False
+        for okx_try in range(5):
+            okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
             okx_text = page.locator("text=OKX Wallet")
-            if await okx_text.count() > 0:
+
+            for _ in range(20):
+                if await okx_option.count() > 0 or await okx_text.count() > 0:
+                    break
+                await asyncio.sleep(0.5)
+
+            if await okx_option.count() > 0:
+                await okx_option.first.click(timeout=5000)
+                log(account_id, f"已点击 OKX Wallet (Portal)（第 {okx_try+1} 次）")
+            elif await okx_text.count() > 0:
                 await okx_text.first.click(timeout=5000)
-                log(account_id, "已选择 OKX Wallet (文本匹配)")
-                await asyncio.sleep(3)
+                log(account_id, f"已点击 OKX Wallet 文本（第 {okx_try+1} 次）")
             else:
                 log(account_id, "Portal 未找到 OKX Wallet 选项")
                 return False
 
-        # 处理登录弹窗（解锁 + 签名），最多等 30 秒
-        for tick in range(30):
+            # 等待钱包弹窗出现，最多 8 秒
+            popup_found = False
+            for _ in range(16):
+                for p in context.pages:
+                    try:
+                        if _is_wallet_popup(p.url or ""):
+                            popup_found = True
+                            break
+                    except Exception:
+                        continue
+                if popup_found:
+                    break
+                await asyncio.sleep(0.5)
+
+            if popup_found:
+                okx_clicked = True
+                break
+            log(account_id, f"点击 OKX Wallet 后未弹窗，重试...")
+            await asyncio.sleep(2)
+
+        if not okx_clicked:
+            log(account_id, "多次点击 OKX Wallet 均未弹窗，放弃")
+            return False
+
+        # 处理登录弹窗（解锁 + 签名），最多等 45 秒
+        for tick in range(45):
             wallet_page = None
             for p in context.pages:
                 try:
@@ -1221,26 +1245,56 @@ async def claim_quest(
 
     try:
         await claim_btn.first.click(timeout=5000)
-        log(account_id, "已点击 Claim")
+        log(account_id, "已点击 Claim，等待钱包签名...")
         await asyncio.sleep(2)
     except Exception as e:
         log(account_id, f"点击 Claim 失败: {e}")
         return False
 
-    # 等待钱包签名（后台 handler 自动处理）
-    for _ in range(30):
+    # 手动处理 Claim 的钱包签名弹窗
+    claim_signed = False
+    for tick in range(45):
+        # 检查是否已完成（按钮消失或变 disabled）
         try:
             if await claim_btn.count() == 0:
+                claim_signed = True
                 break
             is_disabled = await claim_btn.first.get_attribute("disabled")
             if is_disabled is not None:
+                claim_signed = True
                 break
         except Exception:
             pass
+
+        # 查找并处理钱包弹窗
+        wallet_page = None
+        for p in context.pages:
+            try:
+                if _is_wallet_popup(p.url or ""):
+                    wallet_page = p
+                    break
+            except Exception:
+                continue
+
+        if wallet_page:
+            log(account_id, f"Claim 签名弹窗: {wallet_page.url[-60:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            await _click_wallet_button(wallet_page, account_id)
+            log(account_id, "Claim 签名已确认")
+            await asyncio.sleep(3)
+            continue
+
         await asyncio.sleep(1)
 
-    log(account_id, "Claim Quest 完成")
-    return True
+    if claim_signed:
+        log(account_id, "Claim Quest 完成")
+    else:
+        log(account_id, "Claim Quest 签名超时")
+    return claim_signed
 
 
 # ════════════════════════════════════════════════════════
