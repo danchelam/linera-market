@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.23.14"
+__version__ = "2026.03.23.15"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -60,6 +60,10 @@ socketio = SocketIO(app, async_mode='threading')
 # ═══════════════════════════════════════════════
 
 CHECK_UPDATE_ON_START = True
+
+# 状态上报地址（tasks_manager），Runner 会每 2 秒推送一次状态
+REPORT_URL = "http://100.103.90.123:8888/api/linera_report"
+RUNNER_NAME = os.environ.get("RUNNER_NAME", "")
 
 _GH_RAW = "https://raw.githubusercontent.com/danchelam/linera-market/refs/heads/main"
 UPDATE_META_URL = f"{_GH_RAW}/version.json"
@@ -441,13 +445,36 @@ def api_tasks():
     return jsonify([])
 
 
+def _get_runner_name():
+    """获取本机 Runner 名称：优先环境变量，其次计算机名"""
+    if RUNNER_NAME:
+        return RUNNER_NAME
+    import socket
+    return socket.gethostname()
+
+
 def _task_status_pusher():
-    """后台线程：每 2 秒向前端推送一次任务状态"""
+    """后台线程：每 2 秒向前端推送 + 上报到 tasks_manager"""
     while True:
         socketio.sleep(2)
         if is_task_running and task_module and hasattr(task_module, 'TASK_STATUS'):
             data = list(task_module.TASK_STATUS.values())
             socketio.emit('task_status_update', data)
+
+            if REPORT_URL:
+                try:
+                    payload = json.dumps({
+                        'runner': _get_runner_name(),
+                        'tasks': data,
+                    }).encode('utf-8')
+                    req = urllib.request.Request(
+                        REPORT_URL, data=payload,
+                        headers={'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    urllib.request.urlopen(req, timeout=3)
+                except Exception:
+                    pass
 
 
 socketio.start_background_task(_task_status_pusher)
