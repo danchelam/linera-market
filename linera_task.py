@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.2"
+__version__ = "2026.03.24.3"
 
 import asyncio
 import random
@@ -36,7 +36,7 @@ from base_module import (
 # ─── 页面配置 ─────────────────────────────────────────
 DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
-TARGET_BETS = 16
+TARGET_BETS = 21
 
 # 跨轮次进度记忆：account_id → 目标 Trades 总数（持久化到文件，跨重启继承）
 ACCOUNT_TARGET_TRADES: dict[str, int] = {}
@@ -986,7 +986,8 @@ async def run_betting_loop(
         log(account_id, f"收到停止信号，已完成 {completed}/{target_bets} 次")
         return False
 
-    log(account_id, f"全部 {target_bets} 次下注完成")
+    log(account_id, f"全部 {target_bets} 次下注完成，等待 30s 让链上确认...")
+    await asyncio.sleep(30)
     return True
 
 
