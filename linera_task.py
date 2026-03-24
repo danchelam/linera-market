@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.6"
+__version__ = "2026.03.24.7"
 
 import asyncio
 import random
@@ -63,8 +63,31 @@ def _save_target_trades():
 
 _load_target_trades()
 
-# 实时状态追踪：account_id → 状态字典（供 Web 前端展示）
+# 实时状态追踪：account_id → 状态字典（供 Web 前端展示，持久化到文件）
 TASK_STATUS: dict[str, dict] = {}
+_TASK_STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "task_status.json")
+_task_status_dirty = False
+
+
+def _load_task_status():
+    global TASK_STATUS
+    if os.path.exists(_TASK_STATUS_FILE):
+        try:
+            with open(_TASK_STATUS_FILE, "r", encoding="utf-8") as f:
+                TASK_STATUS = _json.load(f)
+        except Exception:
+            pass
+
+
+def _save_task_status():
+    try:
+        with open(_TASK_STATUS_FILE, "w", encoding="utf-8") as f:
+            _json.dump(TASK_STATUS, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+_load_task_status()
 
 
 def _update_status(account_id: str, **fields):
@@ -78,6 +101,7 @@ def _update_status(account_id: str, **fields):
         }
     TASK_STATUS[account_id].update(fields)
     TASK_STATUS[account_id]["updated_at"] = datetime.now().strftime("%H:%M:%S")
+    _save_task_status()
 
 
 def _is_wallet_popup(url: str) -> bool:

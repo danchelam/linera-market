@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.24.6"
+__version__ = "2026.03.24.7"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -340,7 +340,7 @@ def run_batch_logic(thread_count):
     base_module.set_logger_callback(log_emitter)
     base_module.STOP_FLAG = False
 
-    # 显示版本号
+     # 显示版本号
     tv = getattr(task_module, '__version__', '?')
     bv = getattr(base_module, '__version__', '?')
     log_emitter(f"【版本】linera_task: {tv} | base_module: {bv}")
@@ -454,10 +454,10 @@ def _get_runner_name():
 
 
 def _task_status_pusher():
-    """后台线程：每 2 秒向前端推送 + 上报到 tasks_manager"""
+    """后台线程：每 2 秒向前端推送 + 上报到 tasks_manager（含历史数据）"""
     while True:
         socketio.sleep(2)
-        if is_task_running and task_module and hasattr(task_module, 'TASK_STATUS'):
+        if task_module and hasattr(task_module, 'TASK_STATUS') and task_module.TASK_STATUS:
             data = list(task_module.TASK_STATUS.values())
             socketio.emit('task_status_update', data)
 
