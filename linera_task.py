@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.8"
+__version__ = "2026.03.24.9"
 
 import asyncio
 import random
@@ -1082,8 +1082,22 @@ async def navigate_to_history(page: Page, account_id: str) -> bool:
 
 
 async def get_trades_count(page: Page, account_id: str) -> int:
-    """读取 Leaderboard 页面上 Trades 后面的数字"""
+    """读取 History 页面上 Trades 后面的数字，若检测到加载动画则等待其消失"""
     try:
+        spinner = page.locator("i.animate-spinner-linear-spin")
+        spinner_logged = False
+        for _ in range(60):
+            if await spinner.count() == 0:
+                break
+            if not spinner_logged:
+                log(account_id, "Trades 数据加载中，等待...")
+                spinner_logged = True
+            await asyncio.sleep(1)
+        else:
+            log(account_id, "Trades 加载超时（60s）")
+        if spinner_logged:
+            await asyncio.sleep(1)
+
         trades_span = page.locator("span:has-text('Trades') >> span.font-semibold")
         for _ in range(10):
             if await trades_span.count() > 0:
