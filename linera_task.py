@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.3"
+__version__ = "2026.03.24.4"
 
 import asyncio
 import random
@@ -1192,7 +1192,7 @@ async def upload_trades(
 #  Claim Quest（Portal 领取任务奖励）
 # ════════════════════════════════════════════════════════
 
-PORTAL_QUEST_URL = "https://portal.linera.net/quests?taskGuid=b2f274a1-962e-4b99-8bc6-3eaf9e68ead6"
+PORTAL_QUEST_URL = "https://portal.linera.net/quests?taskGuid=f8ee1b19-e787-49d4-b523-7d5b3452e261"
 
 
 async def claim_quest(
