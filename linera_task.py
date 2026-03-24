@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.24.7"
+__version__ = "2026.03.24.8"
 
 import asyncio
 import random
@@ -761,15 +761,16 @@ async def login(
         else:
             log(account_id, "已登录过，跳过 Connect Wallet 流程")
 
-        # ── 统一阶段：处理弹窗 + 等待 Claiming chain ──
-        # 不管是首次连接还是已登录，都在这里统一处理所有剩余弹窗和 Claiming chain
+        # ── 统一阶段：处理弹窗 + 等待 Claiming chain + 等待加载转圈消失 ──
         await asyncio.sleep(2)
         claiming_sel = "span:text-is('Claiming chain...')"
         claiming_loc = page.locator(claiming_sel)
+        spinner_loc = page.locator("svg.animate-spin")
         popup_count = 0
         claiming_logged = False
+        spinner_logged = False
 
-        for tick in range(90):
+        for tick in range(120):
             wallet_page = None
             for p in context.pages:
                 try:
@@ -817,24 +818,42 @@ async def login(
                 await asyncio.sleep(1)
                 continue
 
-            # 没弹窗也没 Claiming chain → 登录完成
+            has_spinner = await spinner_loc.count() > 0
+            if has_spinner:
+                if not spinner_logged:
+                    log(account_id, "页面加载中（转圈），等待...")
+                    spinner_logged = True
+                await asyncio.sleep(1)
+                continue
+
+            # 没弹窗、没 Claiming chain、没转圈 → 登录完成
             if tick > 3:
                 if claiming_logged:
                     log(account_id, "Claiming chain 完成")
+                if spinner_logged:
+                    log(account_id, "页面加载完成")
                 break
             await asyncio.sleep(1)
         else:
             if claiming_logged:
                 log(account_id, "Claiming chain 等待超时，继续执行")
+            if spinner_logged:
+                log(account_id, "页面加载等待超时，继续执行")
 
         await asyncio.sleep(2)
+
+        # ── 登录后验证：Connect Wallet 按钮应该消失 ──
+        connect_btn = page.locator("button:has-text('Connect Wallet')")
+        if await connect_btn.count() > 0:
+            log(account_id, "登录验证失败：Connect Wallet 按钮仍存在")
+            return False
 
         # ── 在 History 页面读取 Trades 基线 ──
         initial_trades = await get_trades_count(page, account_id)
         if initial_trades >= 0:
             log(account_id, f"登录完成，Trades 基线: {initial_trades}")
         else:
-            log(account_id, "登录完成，无法读取 Trades 基线")
+            log(account_id, "登录完成，无法读取 Trades 基线（可能页面未完全加载）")
             initial_trades = -1
 
         # 存入 page 对象供后续使用
