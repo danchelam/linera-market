@@ -66,10 +66,15 @@ REPORT_URL = "http://100.103.90.123:8888/api/linera_report"
 RUNNER_NAME = os.environ.get("RUNNER_NAME", "")
 
 _GH_RAW = "https://raw.githubusercontent.com/danchelam/linera-market/refs/heads/main"
+_CDN_RAW = "https://cdn.jsdelivr.net/gh/danchelam/linera-market@main"
 UPDATE_META_URL = f"{_GH_RAW}/version.json"
 UPDATE_TASK_URL = f"{_GH_RAW}/linera_task.py"
 UPDATE_BASE_URL = f"{_GH_RAW}/base_module.py"
 UPDATE_RUNNER_URL = f"{_GH_RAW}/linera_runner.py"
+_CDN_META_URL = f"{_CDN_RAW}/version.json"
+_CDN_TASK_URL = f"{_CDN_RAW}/linera_task.py"
+_CDN_BASE_URL = f"{_CDN_RAW}/base_module.py"
+_CDN_RUNNER_URL = f"{_CDN_RAW}/linera_runner.py"
 
 LAST_TASK_VERSION = "0"
 LAST_BASE_VERSION = "0"
@@ -100,33 +105,42 @@ def parse_version(v: str):
     return tuple(int(x) for x in nums) if nums else (0,)
 
 
+def _url_fetch(url: str, timeout: int = 15) -> str:
+    """下载 URL 内容，返回文本；失败返回空字符串"""
+    ts = int(time.time())
+    full = f"{url}{'&' if '?' in url else '?'}t={ts}"
+    with urllib.request.urlopen(full, timeout=timeout) as resp:
+        return resp.read().decode("utf-8")
+
+
 def fetch_remote_versions() -> dict:
     if not UPDATE_META_URL:
         return {}
-    try:
-        ts = int(time.time())
-        url = f"{UPDATE_META_URL}{'&' if '?' in UPDATE_META_URL else '?'}t={ts}"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = resp.read().decode("utf-8").strip().lstrip("\ufeff")
-        if data.startswith("{"):
-            return json.loads(data)
-        return {}
-    except Exception as e:
-        print(f"【更新】获取远程版本失败: {e}")
-        return {}
+    for label, meta_url in [("GitHub", UPDATE_META_URL), ("CDN", _CDN_META_URL)]:
+        try:
+            print(f"【更新】检查更新: {meta_url}")
+            data = _url_fetch(meta_url, timeout=10).strip().lstrip("\ufeff")
+            if data.startswith("{"):
+                return json.loads(data)
+        except Exception as e:
+            print(f"【更新】{label} 获取失败: {e}，尝试备用源...")
+    print("【更新】所有源均失败，无法获取远程版本。")
+    return {}
 
 
 def download_script(url: str) -> str:
     if not url:
         return ""
-    try:
-        ts = int(time.time())
-        full_url = f"{url}{'&' if '?' in url else '?'}t={ts}"
-        with urllib.request.urlopen(full_url, timeout=30) as resp:
-            return resp.read().decode("utf-8")
-    except Exception as e:
-        print(f"【更新】下载脚本失败: {e}")
-        return ""
+    cdn_url = url.replace(_GH_RAW, _CDN_RAW) if _GH_RAW in url else ""
+    for label, dl_url in [("GitHub", url), ("CDN", cdn_url)]:
+        if not dl_url:
+            continue
+        try:
+            return _url_fetch(dl_url, timeout=30)
+        except Exception as e:
+            print(f"【更新】{label} 下载失败: {e}，尝试备用源...")
+    print("【更新】所有源均下载失败。")
+    return ""
 
 
 def update_single_script(name: str, local_path: str, remote_version: str, download_url: str) -> bool:
@@ -184,10 +198,8 @@ def try_auto_update():
         LAST_UPDATE_STATUS = "no_config"
         return
 
-    print(f"【更新】检查更新: {UPDATE_META_URL}")
     remote = fetch_remote_versions()
     if not remote:
-        print("【更新】无法获取远程版本信息。")
         LAST_UPDATE_STATUS = "remote_unavailable"
         return
     print(f"【更新】远程版本: {remote}")
