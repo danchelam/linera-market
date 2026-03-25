@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.25.2"
+__version__ = "2026.03.25.3"
 
 import asyncio
 import random
@@ -88,6 +88,26 @@ def _save_task_status():
 
 
 _load_task_status()
+
+# ─── 失败截图开关（由 runner 传入） ─────────────────────
+SCREENSHOT_ON_FAILURE = False
+_SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+
+
+async def _take_failure_screenshot(page, account_id: str, label: str):
+    """失败时自动截图，保存到 screenshots/ 文件夹"""
+    if not SCREENSHOT_ON_FAILURE:
+        return
+    try:
+        os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = label.replace("/", "-").replace("\\", "-").replace(" ", "_")
+        filename = f"{account_id}_{safe_label}_{ts}.png"
+        filepath = os.path.join(_SCREENSHOT_DIR, filename)
+        await page.screenshot(path=filepath, full_page=False)
+        log(account_id, f"【截图】已保存: {filename}")
+    except Exception as e:
+        log(account_id, f"【截图】截图失败: {e}")
 
 
 def _update_status(account_id: str, **fields):
@@ -890,6 +910,7 @@ async def login(
 
         if not login_done:
             log(account_id, f"登录重试 {main_attempt+1} 次后仍失败")
+            await _take_failure_screenshot(page, account_id, "login_all_retries_failed")
             return False
 
         await asyncio.sleep(2)
@@ -898,6 +919,7 @@ async def login(
         connect_btn = page.locator("button:has-text('Connect Wallet')")
         if await connect_btn.count() > 0:
             log(account_id, "登录验证失败：Connect Wallet 按钮仍存在")
+            await _take_failure_screenshot(page, account_id, "login_wallet_btn_still_exists")
             return False
 
         # ── 在 History 页面读取 Trades 基线 ──
@@ -938,10 +960,12 @@ async def place_single_bet(
     # 0. 检测 RPC 致命错误
     if await is_fatal_error(page):
         log(account_id, "检测到 RPC 致命错误，跳过该窗口")
+        await _take_failure_screenshot(page, account_id, "rpc_fatal")
         return False
 
     # 0.5 检测页面是否卡住
     if await is_page_stuck(page):
+        await _take_failure_screenshot(page, account_id, "page_stuck")
         recovered = await recover_from_stuck(page, account_id)
         if not recovered:
             return False
@@ -976,6 +1000,7 @@ async def place_single_bet(
             pass
         if wait == 14:
             log(account_id, "HIGHER/LOWER 长时间不可用")
+            await _take_failure_screenshot(page, account_id, "btn_unavailable")
             return False
         await asyncio.sleep(1)
 
@@ -998,6 +1023,7 @@ async def place_single_bet(
                 pass
             if wait2 == 14:
                 log(account_id, "新一轮 HIGHER/LOWER 不可用")
+                await _take_failure_screenshot(page, account_id, "newround_btn_unavailable")
                 return False
             await asyncio.sleep(1)
 
@@ -1012,6 +1038,7 @@ async def place_single_bet(
         log(account_id, f"[{bet_number}/{target_bets}] 点击 {direction}")
     except Exception as e:
         log(account_id, f"点击 {direction} 失败: {e}")
+        await _take_failure_screenshot(page, account_id, f"click_{direction}_failed")
         return False
 
     # 6. 等待成功标志 + 跟踪弹窗是否出现
@@ -1040,9 +1067,11 @@ async def place_single_bet(
 
     if not popup_seen:
         log(account_id, f"[{bet_number}/{target_bets}] 60s 内钱包弹窗未出现")
+        await _take_failure_screenshot(page, account_id, f"no_popup_bet{bet_number}")
         return NO_POPUP_FAILURE
 
     log(account_id, f"[{bet_number}/{target_bets}] 有弹窗但 60s 内未检测到成功标志")
+    await _take_failure_screenshot(page, account_id, f"popup_no_success_bet{bet_number}")
     return False
 
 
@@ -1070,12 +1099,14 @@ async def run_betting_loop(
     while completed < target_bets and not STOP_FLAG:
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注，等待第二轮重试")
+            await _take_failure_screenshot(page, account_id, "max_failures_reached")
             _update_status(account_id, status="failed", error=f"累计失败{total_failures}次")
             return False
 
         # 连续 3 次无弹窗 → 页面卡住，刷新
         if consecutive_no_popup >= 3:
             log(account_id, f"连续 {consecutive_no_popup} 次无弹窗，判定页面卡住，刷新...")
+            await _take_failure_screenshot(page, account_id, "stuck_no_popup_3x")
             popup_handler.enabled = False
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=30000)
@@ -1094,6 +1125,7 @@ async def run_betting_loop(
 
         if consecutive_failures >= 5:
             log(account_id, f"连续失败 {consecutive_failures} 次，刷新页面...")
+            await _take_failure_screenshot(page, account_id, "consecutive_fail_5x")
             popup_handler.enabled = False
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=30000)

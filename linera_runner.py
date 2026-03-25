@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.25.2"
+__version__ = "2026.03.25.3"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -338,7 +338,7 @@ if base_module:
 #  任务执行逻辑（asyncio 在独立线程中运行）
 # ═══════════════════════════════════════════════
 
-def run_batch_logic(thread_count):
+def run_batch_logic(thread_count, screenshot_mode=False):
     global is_task_running, base_module, task_module
 
     # 每次运行前重新加载，实现"热"更新
@@ -351,6 +351,11 @@ def run_batch_logic(thread_count):
 
     base_module.set_logger_callback(log_emitter)
     base_module.STOP_FLAG = False
+
+    if hasattr(task_module, 'SCREENSHOT_ON_FAILURE'):
+        task_module.SCREENSHOT_ON_FAILURE = screenshot_mode
+        if screenshot_mode:
+            log_emitter("【截图】失败截图模式已开启")
 
      # 显示版本号
     tv = getattr(task_module, '__version__', '?')
@@ -405,11 +410,13 @@ def handle_start_task(data):
     except (ValueError, TypeError, AttributeError):
         threads = 1
 
+    screenshot_mode = bool(data.get('screenshot', False))
+
     is_task_running = True
     emit('status_update', {'running': True})
 
     task_thread = threading.Thread(
-        target=run_batch_logic, args=(threads,), daemon=True,
+        target=run_batch_logic, args=(threads, screenshot_mode), daemon=True,
     )
     task_thread.start()
 
