@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.25.4"
+__version__ = "2026.03.25.5"
 
 import asyncio
 import random
@@ -47,6 +47,13 @@ def _load_target_trades():
     global ACCOUNT_TARGET_TRADES
     if os.path.exists(_TARGET_TRADES_FILE):
         try:
+            mtime = os.path.getmtime(_TARGET_TRADES_FILE)
+            file_date = datetime.fromtimestamp(mtime).date()
+            today = datetime.now().date()
+            if file_date < today:
+                os.remove(_TARGET_TRADES_FILE)
+                ACCOUNT_TARGET_TRADES = {}
+                return
             with open(_TARGET_TRADES_FILE, "r", encoding="utf-8") as f:
                 ACCOUNT_TARGET_TRADES = _json.load(f)
         except Exception:
@@ -1702,8 +1709,9 @@ async def _linera_task_inner(
         if account_id in ACCOUNT_TARGET_TRADES:
             target_total = ACCOUNT_TARGET_TRADES[account_id]
             remaining = target_total - initial_trades
+            log(account_id, f"进度检查: 当前 Trades={initial_trades}，今日目标={target_total}，差={remaining}")
             if remaining <= 0:
-                log(account_id, f"Trades 已达标: {initial_trades} >= {target_total}（上轮进度继承），跳过下注")
+                log(account_id, f"Trades 已达标: {initial_trades} >= {target_total}（今日进度继承），跳过下注")
                 _update_status(account_id, status="uploading",
                                initial_trades=initial_trades, target_trades=target_total,
                                current_trades=initial_trades, bets_completed=0, bets_target=0)
