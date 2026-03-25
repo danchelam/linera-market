@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.25.3"
+__version__ = "2026.03.25.4"
 
 import asyncio
 import random
@@ -1590,16 +1590,14 @@ async def claim_quest(
         return False
 
     # 手动处理 Claim 的钱包签名弹窗
-    claim_signed = False
-    for tick in range(45):
-        # 检查是否已完成（按钮消失或变 disabled）
+    success_loc = page.locator("p.text-sm.text-gray-700:has-text('Quest completed successfully')")
+    claim_done = False
+    for tick in range(60):
+        # 优先检测成功文本
         try:
-            if await claim_btn.count() == 0:
-                claim_signed = True
-                break
-            is_disabled = await claim_btn.first.get_attribute("disabled")
-            if is_disabled is not None:
-                claim_signed = True
+            if await success_loc.count() > 0:
+                claim_done = True
+                log(account_id, "检测到 Quest completed successfully!")
                 break
         except Exception:
             pass
@@ -1628,11 +1626,37 @@ async def claim_quest(
 
         await asyncio.sleep(1)
 
-    if claim_signed:
-        log(account_id, "Claim Quest 完成")
+    if claim_done:
+        log(account_id, "Claim Quest 成功")
     else:
-        log(account_id, "Claim Quest 签名超时")
-    return claim_signed
+        # 未检测到成功文本，再给一次机会：刷新页面检查 Claim 按钮状态
+        log(account_id, "60s 内未检测到成功提示，刷新页面确认...")
+        await _take_failure_screenshot(page, account_id, "claim_no_success_text")
+        try:
+            await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+            # 如果 Claim 按钮消失或变 disabled，说明其实已经成功了
+            fresh_claim = page.locator("button:has-text('Claim')")
+            for _ in range(10):
+                if await fresh_claim.count() > 0:
+                    is_disabled = await fresh_claim.first.get_attribute("disabled")
+                    if is_disabled is not None:
+                        claim_done = True
+                        log(account_id, "刷新后发现 Claim 按钮已 disabled，判定成功")
+                        break
+                    break
+                await asyncio.sleep(1)
+            else:
+                claim_done = True
+                log(account_id, "刷新后 Claim 按钮已消失，判定成功")
+        except Exception as e:
+            log(account_id, f"刷新确认失败: {e}")
+
+        if not claim_done:
+            log(account_id, "Claim Quest 失败：未检测到成功标志")
+            await _take_failure_screenshot(page, account_id, "claim_failed_final")
+
+    return claim_done
 
 
 # ════════════════════════════════════════════════════════
