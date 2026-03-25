@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.25.1"
+__version__ = "2026.03.25.2"
 
 import asyncio
 import random
@@ -420,6 +420,19 @@ async def wait_countdown(page: Page, account_id: str, timeout: int = 90):
             pass
         await asyncio.sleep(1)
     log(account_id, "等待倒计时超时")
+
+
+async def get_countdown_value(page: Page) -> int:
+    """读取当前倒计时秒数，无倒计时返回 -1"""
+    try:
+        loc = page.locator("span.text-foreground-muted")
+        if await loc.count() > 0:
+            text = (await loc.first.inner_text(timeout=2000)).strip()
+            if text.isdigit():
+                return int(text)
+    except Exception:
+        pass
+    return -1
 
 
 async def get_pool_balance(page: Page) -> str:
@@ -906,21 +919,20 @@ async def login(
 #  单次下注（依赖后台 handler 自动签名）
 # ════════════════════════════════════════════════════════
 
+NO_POPUP_FAILURE = "no_popup"
+
 async def place_single_bet(
     page: Page,
     context: BrowserContext,
     account_id: str,
     bet_number: int,
     target_bets: int = TARGET_BETS,
-) -> bool:
+):
     """
-    单次下注流程：
-    0. 检测页面是否卡住 → 卡住则切换市场恢复
-    1. 检查池子 → 切换市场(+1min)
-    2. 等结算完成
-    3. 点击 HIGHER/LOWER
-    4. 后台 WalletPopupHandler 自动处理签名
-    5. 等待成功标志确认
+    单次下注流程，返回值：
+      True  — 下注成功
+      False — 普通失败（有弹窗但未成功等）
+      "no_popup" — 60s 内钱包弹窗完全没出现
     """
 
     # 0. 检测 RPC 致命错误
@@ -934,7 +946,7 @@ async def place_single_bet(
         if not recovered:
             return False
 
-    # 1. 检查池子余额（仅在余额为 0 时才切换市场）
+    # 1. 检查池子余额
     balance = await get_pool_balance(page)
     if balance in ("0", "0.00", "0.000", ""):
         log(account_id, f"池子余额为 '{balance}'，切换市场...")
@@ -967,6 +979,28 @@ async def place_single_bet(
             return False
         await asyncio.sleep(1)
 
+    # 3.5 倒计时 < 8 秒则等新一轮
+    cd = await get_countdown_value(page)
+    if 0 < cd < 8:
+        log(account_id, f"倒计时仅剩 {cd}s，等新一轮...")
+        await wait_countdown(page, account_id)
+        await asyncio.sleep(2)
+        await wait_settlement_done(page, account_id)
+        for wait2 in range(15):
+            try:
+                h2 = page.locator("button.btn-higher")
+                l2 = page.locator("button.btn-lower")
+                if (await h2.count() > 0 and await l2.count() > 0
+                        and await h2.get_attribute("disabled") is None
+                        and await l2.get_attribute("disabled") is None):
+                    break
+            except Exception:
+                pass
+            if wait2 == 14:
+                log(account_id, "新一轮 HIGHER/LOWER 不可用")
+                return False
+            await asyncio.sleep(1)
+
     # 4. 记录当前 card-glass 数量（下注前基线）
     baseline = await get_card_glass_count(page)
 
@@ -980,30 +1014,36 @@ async def place_single_bet(
         log(account_id, f"点击 {direction} 失败: {e}")
         return False
 
-    # 6. 等待成功标志：card-glass 数量 > baseline
+    # 6. 等待成功标志 + 跟踪弹窗是否出现
     log(account_id, f"[{bet_number}/{target_bets}] 等待钱包自动签名 + 成功标志...")
     success = False
+    popup_seen = False
     for i in range(60):
         if STOP_FLAG:
             return False
         if await check_bet_success(page, baseline):
             success = True
             break
+        if not popup_seen:
+            for p in context.pages:
+                try:
+                    if _is_wallet_popup(p.url or ""):
+                        popup_seen = True
+                        break
+                except Exception:
+                    continue
         await asyncio.sleep(1)
 
     if success:
         log(account_id, f"[{bet_number}/{target_bets}] 下注成功")
-    else:
-        log(account_id, f"[{bet_number}/{target_bets}] 60s 内未检测到成功标志")
-        return False
+        return True
 
-    # 6. 等待倒计时归零（本轮结束）
-    await wait_countdown(page, account_id)
-    await asyncio.sleep(random.uniform(1.5, 2.5))
+    if not popup_seen:
+        log(account_id, f"[{bet_number}/{target_bets}] 60s 内钱包弹窗未出现")
+        return NO_POPUP_FAILURE
 
-    # 7. 等待结算完成
-    await wait_settlement_done(page, account_id)
-    return True
+    log(account_id, f"[{bet_number}/{target_bets}] 有弹窗但 60s 内未检测到成功标志")
+    return False
 
 
 # ════════════════════════════════════════════════════════
@@ -1019,8 +1059,10 @@ async def run_betting_loop(
 ) -> bool:
     completed = 0
     consecutive_failures = 0
+    consecutive_no_popup = 0
     total_failures = 0
     max_total_failures = 10
+    market_idx = 0
 
     log(account_id, f"开始下注，目标 {target_bets} 次")
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
@@ -1030,6 +1072,25 @@ async def run_betting_loop(
             log(account_id, f"累计失败 {total_failures} 次，放弃下注，等待第二轮重试")
             _update_status(account_id, status="failed", error=f"累计失败{total_failures}次")
             return False
+
+        # 连续 3 次无弹窗 → 页面卡住，刷新
+        if consecutive_no_popup >= 3:
+            log(account_id, f"连续 {consecutive_no_popup} 次无弹窗，判定页面卡住，刷新...")
+            popup_handler.enabled = False
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            if not await wait_rpc_recovery(page, account_id, context):
+                popup_handler.enabled = True
+                return False
+            await handle_wallet_popups_manual(context, account_id, timeout=15)
+            await asyncio.sleep(3)
+            popup_handler.enabled = True
+            consecutive_no_popup = 0
+            consecutive_failures = 0
+            continue
 
         if consecutive_failures >= 5:
             log(account_id, f"连续失败 {consecutive_failures} 次，刷新页面...")
@@ -1047,17 +1108,44 @@ async def run_betting_loop(
             popup_handler.enabled = True
             consecutive_failures = 0
 
-        success = await place_single_bet(
+        result = await place_single_bet(
             page, context, account_id, completed + 1, target_bets,
         )
 
-        if success:
+        if result is True:
             completed += 1
             consecutive_failures = 0
+            consecutive_no_popup = 0
             log(account_id, f"已完成 {completed}/{target_bets} 次下注")
             _update_status(account_id, bets_completed=completed, error="")
+
+            # 切换到下一个市场
+            if completed < target_bets:
+                market_idx = (market_idx + 1) % len(MARKETS)
+                next_market = MARKETS[market_idx]
+                await switch_market(page, account_id, next_market)
+
+                # 等待上一注的 card-glass 消失（上一轮结果清除）
+                card_glass_loc = page.locator("div.card-glass")
+                for cg_wait in range(30):
+                    if await card_glass_loc.count() == 0:
+                        break
+                    await asyncio.sleep(1)
+
+                if not await wait_rpc_recovery(page, account_id, context):
+                    return False
+
+        elif result == NO_POPUP_FAILURE:
+            consecutive_no_popup += 1
+            consecutive_failures += 1
+            total_failures += 1
+            log(account_id,
+                f"无弹窗失败（连续无弹窗: {consecutive_no_popup}/3，累计: {total_failures}/{max_total_failures}）")
+            _update_status(account_id, error=f"无弹窗{consecutive_no_popup}/3")
+            await asyncio.sleep(3)
         else:
             consecutive_failures += 1
+            consecutive_no_popup = 0
             total_failures += 1
             log(account_id,
                 f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}），等待后重试...")
