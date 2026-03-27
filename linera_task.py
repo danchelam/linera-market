@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.3"
+__version__ = "2026.03.27.4"
 
 import asyncio
 import random
@@ -386,16 +386,21 @@ async def is_settling(page: Page) -> bool:
         return False
 
 
-async def wait_settlement_done(page: Page, account_id: str, timeout: int = 120):
+async def wait_settlement_done(page: Page, account_id: str, timeout: int = 60) -> bool:
+    """等待结算完成。返回 True=正常结算，False=超时（可能 RPC 卡住）"""
     if not await is_settling(page):
-        return
+        return True
     log(account_id, "市场结算中，等待...")
     for _ in range(timeout):
-        if STOP_FLAG or not await is_settling(page):
+        if STOP_FLAG:
+            return False
+        if not await is_settling(page):
             log(account_id, "结算完成")
-            return
+            return True
         await asyncio.sleep(1)
-    log(account_id, "等待结算超时")
+    log(account_id, f"结算超时（{timeout}s），可能 RPC 卡住")
+    await _take_failure_screenshot(page, account_id, "settlement_timeout")
+    return False
 
 
 # ════════════════════════════════════════════════════════
@@ -1057,7 +1062,8 @@ async def place_single_bet(
                 break
 
     # 2. 等待结算完成
-    await wait_settlement_done(page, account_id)
+    if not await wait_settlement_done(page, account_id):
+        return False
 
     # 3. 确认按钮可用
     for wait in range(15):
@@ -1082,7 +1088,8 @@ async def place_single_bet(
         log(account_id, f"倒计时仅剩 {cd}s，等新一轮...")
         await wait_countdown(page, account_id)
         await asyncio.sleep(2)
-        await wait_settlement_done(page, account_id)
+        if not await wait_settlement_done(page, account_id):
+            return False
         for wait2 in range(15):
             try:
                 h2 = page.locator("button.btn-higher")
