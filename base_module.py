@@ -30,7 +30,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.27.4"
+__version__ = "2026.03.27.5"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -1247,7 +1247,11 @@ async def run_single_account(
                 await browser.close()
             except Exception:
                 pass
-            await asyncio.to_thread(hub.close_browser, container_code)
+        for _close_try in range(3):
+            closed = await asyncio.to_thread(hub.close_browser, container_code)
+            if closed:
+                break
+            await asyncio.sleep(2)
 
 
 async def run_batch(

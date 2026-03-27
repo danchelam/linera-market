@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.4"
+__version__ = "2026.03.27.5"
 
 import asyncio
 import random
@@ -1941,9 +1941,12 @@ async def _linera_task_inner(
 
     # ── Step 6: Claim Quest ──
     _update_status(account_id, status="claiming")
-    await claim_quest(page, context, account_id, popup_handler)
-
-    _update_status(account_id, status="done")
+    claim_ok = await claim_quest(page, context, account_id, popup_handler)
+    if not claim_ok:
+        log(account_id, "Claim Quest 未成功，但下注和上传已完成")
+        _update_status(account_id, status="done", error="Claim未成功")
+    else:
+        _update_status(account_id, status="done")
     return True
 
 
