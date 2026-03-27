@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.25.5"
+__version__ = "2026.03.27.1"
 
 import asyncio
 import random
@@ -102,19 +102,77 @@ _SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scre
 
 
 async def _take_failure_screenshot(page, account_id: str, label: str):
-    """失败时自动截图，保存到 screenshots/ 文件夹"""
+    """失败时自动截图，保存到 screenshots/{窗口号}/ 文件夹"""
     if not SCREENSHOT_ON_FAILURE:
         return
     try:
-        os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+        acct_dir = os.path.join(_SCREENSHOT_DIR, account_id)
+        os.makedirs(acct_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_label = label.replace("/", "-").replace("\\", "-").replace(" ", "_")
-        filename = f"{account_id}_{safe_label}_{ts}.png"
-        filepath = os.path.join(_SCREENSHOT_DIR, filename)
+        filename = f"{safe_label}_{ts}.png"
+        filepath = os.path.join(acct_dir, filename)
         await page.screenshot(path=filepath, full_page=False)
-        log(account_id, f"【截图】已保存: {filename}")
+        log(account_id, f"【截图】已保存: {account_id}/{filename}")
     except Exception as e:
         log(account_id, f"【截图】截图失败: {e}")
+
+
+# ─── 定时截图（全程录制）开关 ─────────────────────────
+TIMELAPSE_ENABLED = False
+TIMELAPSE_INTERVAL = 3
+
+
+class TimelapseRecorder:
+    """后台定时截图，成功删除、失败保留"""
+
+    def __init__(self, page: Page, account_id: str):
+        self.page = page
+        self.account_id = account_id
+        self.folder = os.path.join(_SCREENSHOT_DIR, account_id)
+        self._task: asyncio.Task = None
+        self._running = False
+        self._count = 0
+
+    async def start(self):
+        if not TIMELAPSE_ENABLED or self._running:
+            return
+        self._running = True
+        self._count = 0
+        os.makedirs(self.folder, exist_ok=True)
+        self._task = asyncio.create_task(self._loop())
+        log(self.account_id, f"【录制】定时截图已启动（间隔 {TIMELAPSE_INTERVAL}s）")
+
+    async def _loop(self):
+        while self._running:
+            try:
+                ts = datetime.now().strftime("%H%M%S")
+                filepath = os.path.join(self.folder, f"tl_{self._count:05d}_{ts}.png")
+                await self.page.screenshot(path=filepath, full_page=False)
+                self._count += 1
+            except Exception:
+                pass
+            await asyncio.sleep(TIMELAPSE_INTERVAL)
+
+    async def stop(self, success: bool):
+        if not self._running:
+            return
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if success:
+            try:
+                import shutil
+                shutil.rmtree(self.folder, ignore_errors=True)
+                log(self.account_id, f"【录制】任务成功，已删除 {self._count} 张截图")
+            except Exception:
+                pass
+        else:
+            log(self.account_id, f"【录制】任务失败，保留 {self._count} 张截图: {self.folder}")
 
 
 def _update_status(account_id: str, **fields):
@@ -1680,11 +1738,17 @@ async def linera_task(
     target_bets = kwargs.get("target_bets", TARGET_BETS)
     current_round = TASK_STATUS.get(account_id, {}).get("round", 0) + 1
     _update_status(account_id, status="logging_in", round=current_round, error="")
+
+    recorder = TimelapseRecorder(page, account_id)
+    await recorder.start()
+
     result = await _linera_task_inner(page, context, account_id, popup_handler, target_bets)
     if not result:
         cur = TASK_STATUS.get(account_id, {})
         if cur.get("status") not in ("done", "failed"):
             _update_status(account_id, status="failed", error=cur.get("error") or "任务异常退出")
+
+    await recorder.stop(success=result)
     return result
 
 

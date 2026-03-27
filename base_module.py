@@ -30,7 +30,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.25.5"
+__version__ = "2026.03.27.1"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -59,8 +59,21 @@ PERF_DEBUG = os.environ.get("PERF_DEBUG", "1").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
+# ════════════════════════════════════════════════════════════
+#  Clash 代理配置
+# ════════════════════════════════════════════════════════════
+
+CLASH_API_URL = os.environ.get("CLASH_API_URL", "http://127.0.0.1:9097")
+CLASH_API_SECRET = os.environ.get("CLASH_API_SECRET", "set-your-secret")
+CLASH_PROXY_GROUP = os.environ.get("CLASH_PROXY_GROUP", "\u24c2 TODAY")
+CLASH_TEST_URL = "http://www.gstatic.com/generate_204"
+CLASH_MIN_SWITCH_INTERVAL = 30
+
 _print_lock = threading.Lock()
 _file_lock = threading.Lock()
+_clash_lock = threading.Lock()
+_clash_last_switch: float = 0.0
+_clash_available: Optional[bool] = None
 _logger_callback: Optional[Callable] = None
 
 
@@ -99,6 +112,134 @@ def perf_log(account_id: str, msg: str):
 def stop_all_tasks():
     global STOP_FLAG
     STOP_FLAG = True
+
+
+# ════════════════════════════════════════════════════════════
+#  Clash 代理管理（节点自动切换）
+# ════════════════════════════════════════════════════════════
+
+class ClashProxyManager:
+    """
+    通过 Clash RESTful API 实现代理节点自动切换。
+    所有方法为同步阻塞调用，异步上下文中使用 asyncio.to_thread 包装。
+    全局冷却机制防止频繁切换影响其他并发窗口。
+    """
+
+    def __init__(self):
+        self.api_url = CLASH_API_URL.rstrip("/")
+        self.headers = {
+            "Authorization": f"Bearer {CLASH_API_SECRET}",
+            "Content-Type": "application/json",
+        }
+        self.group = CLASH_PROXY_GROUP
+
+    def _get(self, path: str, timeout: int = 10):
+        try:
+            resp = requests.get(
+                f"{self.api_url}{path}",
+                headers=self.headers,
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return None
+
+    def _put(self, path: str, data: dict, timeout: int = 10) -> bool:
+        try:
+            resp = requests.put(
+                f"{self.api_url}{path}",
+                headers=self.headers,
+                json=data,
+                timeout=timeout,
+            )
+            return resp.status_code in (200, 204)
+        except Exception:
+            return False
+
+    def is_available(self) -> bool:
+        global _clash_available
+        if _clash_available is not None:
+            return _clash_available
+        result = self._get("/version", timeout=3)
+        _clash_available = result is not None
+        if _clash_available:
+            log("SYSTEM", f"[Clash] API 可用 (版本: {result.get('version', '?')})")
+        return _clash_available
+
+    def get_current_proxy(self) -> str:
+        import urllib.parse
+        info = self._get(f"/proxies/{urllib.parse.quote(self.group)}") or {}
+        return info.get("now", "")
+
+    def test_group_delay(self, timeout_ms: int = 5000) -> dict:
+        import urllib.parse
+        encoded_group = urllib.parse.quote(self.group)
+        encoded_url = urllib.parse.quote(CLASH_TEST_URL)
+        return self._get(
+            f"/group/{encoded_group}/delay?url={encoded_url}&timeout={timeout_ms}",
+            timeout=timeout_ms // 1000 + 15,
+        ) or {}
+
+    def switch_proxy(self, name: str) -> bool:
+        import urllib.parse
+        return self._put(
+            f"/proxies/{urllib.parse.quote(self.group)}",
+            {"name": name},
+        )
+
+    def switch_to_best(self, account_id: str = "SYSTEM") -> bool:
+        """测试所有节点延迟并切换到最快的不同节点。带全局冷却。"""
+        global _clash_last_switch
+
+        if not self.is_available():
+            return False
+
+        with _clash_lock:
+            now = _time_mod.time()
+            if now - _clash_last_switch < CLASH_MIN_SWITCH_INTERVAL:
+                elapsed = int(now - _clash_last_switch)
+                log(account_id, f"[Clash] 距上次切换仅 {elapsed}s（冷却 {CLASH_MIN_SWITCH_INTERVAL}s），跳过")
+                return False
+            _clash_last_switch = now
+
+        current = self.get_current_proxy()
+        log(account_id, f"[Clash] 当前节点: {current}，正在测速...")
+
+        delays = self.test_group_delay()
+        if not delays:
+            log(account_id, "[Clash] 测速失败，无延迟数据")
+            return False
+
+        valid = sorted(
+            [(k, v) for k, v in delays.items() if isinstance(v, (int, float)) and v > 0],
+            key=lambda x: x[1],
+        )
+        if not valid:
+            log(account_id, "[Clash] 所有节点均超时")
+            return False
+
+        top_str = ", ".join(f"{n}({d}ms)" for n, d in valid[:3])
+        log(account_id, f"[Clash] 最快 Top3: {top_str}")
+
+        target_name, target_delay = valid[0]
+        if target_name == current and len(valid) > 1:
+            target_name, target_delay = valid[1]
+
+        if target_name == current:
+            log(account_id, f"[Clash] 当前节点已是最优: {current}")
+            return False
+
+        ok = self.switch_proxy(target_name)
+        if ok:
+            log(account_id, f"[Clash] 切换成功: {current} -> {target_name} ({target_delay}ms)")
+        else:
+            log(account_id, f"[Clash] 切换失败: {target_name}")
+        return ok
+
+
+clash_manager = ClashProxyManager()
 
 
 # ════════════════════════════════════════════════════════════
@@ -288,15 +429,15 @@ class HubstudioManager:
         import time as _t
         url = f"{self.api_base_url}/api/v1/browser/start"
         payload = {"containerCode": str(container_code)}
-        # (连接超时, 读取超时) — 与 Hubstudio 默认 600s 一致，避免代理/冷启动时过早断开
         req_timeout = (30, HUBSTUDIO_BROWSER_START_TIMEOUT)
-        for attempt in range(5):
+        timeout_count = 0
+        max_timeout_retries = 3
+        for attempt in range(5 + max_timeout_retries):
             try:
-                if attempt == 0:
-                    log(
-                        container_code,
-                        f"正在请求启动环境（代理/冷启动可能较慢，最长等待 {HUBSTUDIO_BROWSER_START_TIMEOUT}s）...",
-                    )
+                log(
+                    container_code,
+                    f"正在请求启动环境（代理/冷启动可能较慢，最长等待 {HUBSTUDIO_BROWSER_START_TIMEOUT}s）...",
+                )
                 resp = requests.post(url, json=payload, timeout=req_timeout)
                 data = resp.json()
                 code = data.get("code")
@@ -313,19 +454,28 @@ class HubstudioManager:
                     return self._get_running_port(container_code)
                 if "频繁" in msg or "Too many" in msg:
                     wait = (attempt + 1) * 3
-                    log(container_code, f"API 限速，{wait}s 后重试({attempt + 2}/5)...")
+                    log(container_code, f"API 限速，{wait}s 后重试...")
                     _t.sleep(wait)
                     continue
                 log(container_code, f"启动失败: {msg} (code={code})")
                 return None
             except Exception as e:
                 err = str(e)
-                if "timed out" in err.lower() or "timeout" in err.lower():
-                    log(
-                        container_code,
+                is_timeout = "timed out" in err.lower() or "timeout" in err.lower()
+                if is_timeout:
+                    timeout_count += 1
+                    log(container_code,
                         f"启动请求超时（{HUBSTUDIO_BROWSER_START_TIMEOUT}s）。"
-                        "若环境带代理，请检查代理是否可用；或先在 Hubstudio 里手动打开该环境一次。",
-                    )
+                        f"（超时第 {timeout_count}/{max_timeout_retries} 次）")
+                    if timeout_count >= max_timeout_retries:
+                        log(container_code,
+                            f"连续超时 {max_timeout_retries} 次，放弃。"
+                            "请检查代理是否可用；或先在 Hubstudio 里手动打开该环境一次。")
+                        return None
+                    clash_manager.switch_to_best(container_code)
+                    self.close_browser(container_code)
+                    _t.sleep(3)
+                    continue
                 log(container_code, f"启动异常: {e}")
                 return None
         return None
