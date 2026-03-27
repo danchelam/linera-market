@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.6"
+__version__ = "2026.03.27.7"
 
 import asyncio
 import random
@@ -386,8 +386,12 @@ async def is_settling(page: Page) -> bool:
         return False
 
 
-async def wait_settlement_done(page: Page, account_id: str, timeout: int = 60) -> bool:
-    """等待结算完成。返回 True=正常结算，False=超时（可能 RPC 卡住）"""
+async def wait_settlement_done(
+    page: Page, account_id: str,
+    context: BrowserContext = None,
+    timeout: int = 120,
+) -> bool:
+    """等待结算完成。超时后自动刷新页面+RPC恢复。"""
     if not await is_settling(page):
         return True
     log(account_id, "市场结算中，等待...")
@@ -398,9 +402,18 @@ async def wait_settlement_done(page: Page, account_id: str, timeout: int = 60) -
             log(account_id, "结算完成")
             return True
         await asyncio.sleep(1)
-    log(account_id, f"结算超时（{timeout}s），可能 RPC 卡住")
+
+    log(account_id, f"结算超时（{timeout}s），刷新页面恢复...")
     await _take_failure_screenshot(page, account_id, "settlement_timeout")
-    return False
+    try:
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    await asyncio.sleep(5)
+    if context:
+        if not await wait_rpc_recovery(page, account_id, context):
+            return False
+    return True
 
 
 # ════════════════════════════════════════════════════════
@@ -1061,8 +1074,8 @@ async def place_single_bet(
                 log(account_id, f"{m} 池子余额: {new_bal}")
                 break
 
-    # 2. 等待结算完成
-    if not await wait_settlement_done(page, account_id):
+    # 2. 等待结算完成（超时会自动刷新+RPC恢复）
+    if not await wait_settlement_done(page, account_id, context):
         return False
 
     # 3. 确认按钮可用
@@ -1088,7 +1101,7 @@ async def place_single_bet(
         log(account_id, f"倒计时仅剩 {cd}s，等新一轮...")
         await wait_countdown(page, account_id)
         await asyncio.sleep(2)
-        if not await wait_settlement_done(page, account_id):
+        if not await wait_settlement_done(page, account_id, context):
             return False
         for wait2 in range(15):
             try:
