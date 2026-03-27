@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.7"
+__version__ = "2026.03.28.1"
 
 import asyncio
 import random
@@ -1090,7 +1090,11 @@ async def place_single_bet(
         except Exception:
             pass
         if wait == 14:
-            log(account_id, "HIGHER/LOWER 长时间不可用")
+            connect_btn = page.locator("button:has-text('Connect Wallet')")
+            if await connect_btn.count() > 0:
+                log(account_id, "HIGHER/LOWER 不可用：钱包已掉线")
+            else:
+                log(account_id, "HIGHER/LOWER 长时间不可用")
             await _take_failure_screenshot(page, account_id, "btn_unavailable")
             return False
         await asyncio.sleep(1)
@@ -1168,6 +1172,100 @@ async def place_single_bet(
 
 
 # ════════════════════════════════════════════════════════
+#  钱包重连（下注期间掉线时使用）
+# ════════════════════════════════════════════════════════
+
+async def reconnect_wallet(
+    page: Page, context: BrowserContext, account_id: str,
+    popup_handler: WalletPopupHandler,
+) -> bool:
+    """刷新后检测钱包是否掉线，如掉线则重新连接。"""
+    connect_btn = page.locator("button:has-text('Connect Wallet')")
+    if await connect_btn.count() == 0:
+        return True
+
+    log(account_id, "检测到钱包掉线，重新连接...")
+    popup_handler.enabled = False
+    try:
+        try:
+            await connect_btn.first.click(timeout=5000)
+            await asyncio.sleep(2)
+        except Exception:
+            return False
+
+        okx = page.locator("button:has-text('OKX Wallet'), img[alt='OKX Wallet']")
+        for _ in range(10):
+            if await okx.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+        if await okx.count() > 0:
+            await okx.first.click(timeout=5000)
+            log(account_id, "已选择 OKX Wallet（重连）")
+            await asyncio.sleep(3)
+
+        # 处理钱包弹窗（解锁+签名）
+        for tick in range(45):
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    if _is_wallet_popup(p.url or ""):
+                        wallet_page = p
+                        break
+                except Exception:
+                    continue
+
+            if not wallet_page:
+                # 检查是否已连接成功
+                if await connect_btn.count() == 0:
+                    log(account_id, "钱包重连成功")
+                    return True
+                await asyncio.sleep(1)
+                continue
+
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+            has_pwd = False
+            for frame in wallet_page.frames:
+                try:
+                    if await frame.locator('input[type="password"]').count() > 0:
+                        has_pwd = True
+                        break
+                except Exception:
+                    continue
+
+            if has_pwd:
+                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                await asyncio.sleep(0.5)
+                await _click_unlock_button(wallet_page, context, account_id)
+                log(account_id, "钱包解锁完成（重连）")
+            else:
+                await _click_wallet_button(wallet_page, account_id)
+                log(account_id, "钱包弹窗已处理（重连）")
+            await asyncio.sleep(3)
+
+        # 等加载完成
+        spinner = page.locator("svg.animate-spin")
+        for _ in range(30):
+            if await spinner.count() == 0:
+                break
+            await asyncio.sleep(1)
+
+        if await connect_btn.count() == 0:
+            log(account_id, "钱包重连成功")
+            return True
+        else:
+            log(account_id, "钱包重连失败")
+            await _take_failure_screenshot(page, account_id, "reconnect_wallet_failed")
+            return False
+    finally:
+        popup_handler.enabled = True
+
+
+# ════════════════════════════════════════════════════════
 #  下注主循环
 # ════════════════════════════════════════════════════════
 
@@ -1208,9 +1306,10 @@ async def run_betting_loop(
             if not await wait_rpc_recovery(page, account_id, context):
                 popup_handler.enabled = True
                 return False
-            await handle_wallet_popups_manual(context, account_id, timeout=15)
-            await asyncio.sleep(3)
             popup_handler.enabled = True
+            if not await reconnect_wallet(page, context, account_id, popup_handler):
+                await handle_wallet_popups_manual(context, account_id, timeout=15)
+            await asyncio.sleep(3)
             consecutive_no_popup = 0
             consecutive_failures = 0
             continue
@@ -1227,9 +1326,10 @@ async def run_betting_loop(
             if not await wait_rpc_recovery(page, account_id, context):
                 popup_handler.enabled = True
                 return False
-            await handle_wallet_popups_manual(context, account_id, timeout=15)
-            await asyncio.sleep(3)
             popup_handler.enabled = True
+            if not await reconnect_wallet(page, context, account_id, popup_handler):
+                await handle_wallet_popups_manual(context, account_id, timeout=15)
+            await asyncio.sleep(3)
             consecutive_failures = 0
 
         result = await place_single_bet(
@@ -1271,6 +1371,28 @@ async def run_betting_loop(
             consecutive_failures += 1
             consecutive_no_popup = 0
             total_failures += 1
+
+            # 立即检测钱包掉线：不用等连续5次，直接刷新重连
+            connect_btn = page.locator("button:has-text('Connect Wallet')")
+            if await connect_btn.count() > 0:
+                log(account_id, "检测到钱包掉线，立即刷新重连...")
+                popup_handler.enabled = False
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+                if not await wait_rpc_recovery(page, account_id, context):
+                    popup_handler.enabled = True
+                    return False
+                popup_handler.enabled = True
+                if not await reconnect_wallet(page, context, account_id, popup_handler):
+                    log(account_id, "钱包重连失败，放弃")
+                    return False
+                await asyncio.sleep(3)
+                consecutive_failures = 0
+                continue
+
             log(account_id,
                 f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}），等待后重试...")
             _update_status(account_id, error=f"连续失败{consecutive_failures}次")
