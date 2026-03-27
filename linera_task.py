@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.2"
+__version__ = "2026.03.27.3"
 
 import asyncio
 import random
@@ -1835,9 +1835,50 @@ async def _linera_task_inner(
     if not bet_ok:
         return False
 
-    # ── Step 4: 校验 History 笔数，不足则补跑 ──
+    # ── Step 4: 校验 History 笔数（轮询等上链），不足则补跑 ──
     _update_status(account_id, status="verifying")
     if target_total >= 0:
+        # 先轮询等链上确认
+        if not await navigate_to_history(page, account_id):
+            log(account_id, "无法导航到 History，跳过校验")
+        else:
+            await asyncio.sleep(3)
+            last_trades = -1
+            stable_count = 0
+            for poll in range(6):
+                cur_trades = await get_trades_count(page, account_id)
+                if cur_trades < 0:
+                    log(account_id, "无法读取 Trades 数量")
+                    break
+                _update_status(account_id, current_trades=cur_trades)
+                shortfall = target_total - cur_trades
+
+                if shortfall <= 0:
+                    log(account_id, f"Trades 校验通过: {cur_trades} >= {target_total}")
+                    break
+
+                if cur_trades == last_trades:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+
+                if stable_count >= 2:
+                    log(account_id, f"Trades 连续 {stable_count+1} 次未变化（{cur_trades}/{target_total}），判定上链完成")
+                    break
+
+                last_trades = cur_trades
+                if cur_trades > (target_total - target_bets):
+                    log(account_id, f"Trades {cur_trades}/{target_total}（差 {shortfall}），链上确认中，等 30s...")
+                else:
+                    log(account_id, f"Trades {cur_trades}/{target_total}（差 {shortfall}），等 30s...")
+                await asyncio.sleep(30)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+
+        # 轮询结束后，如果仍不足则补跑
         for verify_round in range(2):
             if not await navigate_to_history(page, account_id):
                 log(account_id, "无法导航到 History，跳过校验")
@@ -1854,7 +1895,7 @@ async def _linera_task_inner(
                 log(account_id, f"Trades 校验通过: {final_trades} >= {target_total}")
                 break
 
-            log(account_id, f"Trades 不足: {final_trades}/{target_total}，还差 {shortfall} 次，补跑中...")
+            log(account_id, f"Trades 确认不足: {final_trades}/{target_total}，还差 {shortfall} 次，补跑中...")
             if not await navigate_back_to_market(page, account_id):
                 break
             await asyncio.sleep(3)
