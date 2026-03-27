@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.27.1"
+__version__ = "2026.03.27.2"
 
 import asyncio
 import random
@@ -80,6 +80,13 @@ def _load_task_status():
     global TASK_STATUS
     if os.path.exists(_TASK_STATUS_FILE):
         try:
+            mtime = os.path.getmtime(_TASK_STATUS_FILE)
+            file_date = datetime.fromtimestamp(mtime).date()
+            today = datetime.now().date()
+            if file_date < today:
+                os.remove(_TASK_STATUS_FILE)
+                TASK_STATUS = {}
+                return
             with open(_TASK_STATUS_FILE, "r", encoding="utf-8") as f:
                 TASK_STATUS = _json.load(f)
         except Exception:
