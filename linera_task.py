@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.5"
+__version__ = "2026.03.28.6"
 
 import asyncio
 import random
@@ -890,36 +890,40 @@ async def login(
                             continue
                         break
 
-                    log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
                     try:
-                        await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2)
-
-                    has_pwd = False
-                    for frame in wallet_page.frames:
+                        log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
                         try:
-                            if await frame.locator('input[type="password"]').count() > 0:
-                                has_pwd = True
-                                break
+                            await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
                         except Exception:
-                            continue
+                            pass
+                        await asyncio.sleep(2)
 
-                    if has_pwd:
-                        log(account_id, "弹窗含密码框，执行解锁...")
-                        await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
-                        await asyncio.sleep(0.5)
-                        await _click_unlock_button(wallet_page, context, account_id)
-                        await asyncio.sleep(3)
-                        log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
-                    else:
-                        clicked = await _click_wallet_button(wallet_page, account_id)
-                        if clicked:
-                            log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
+                        has_pwd = False
+                        for frame in wallet_page.frames:
+                            try:
+                                if await frame.locator('input[type="password"]').count() > 0:
+                                    has_pwd = True
+                                    break
+                            except Exception:
+                                continue
+
+                        if has_pwd:
+                            log(account_id, "弹窗含密码框，执行解锁...")
+                            await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                            await asyncio.sleep(0.5)
+                            await _click_unlock_button(wallet_page, context, account_id)
                             await asyncio.sleep(3)
+                            log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
                         else:
-                            break
+                            clicked = await _click_wallet_button(wallet_page, account_id)
+                            if clicked:
+                                log(account_id, f"钱包弹窗已处理（第 {round_num+1} 轮）")
+                                await asyncio.sleep(3)
+                            else:
+                                break
+                    except Exception:
+                        log(account_id, f"弹窗处理中页面已关闭（第 {round_num+1} 轮），继续")
+                        await asyncio.sleep(2)
 
                 # 检测 Select Ethereum network
                 await asyncio.sleep(2)
@@ -961,31 +965,34 @@ async def login(
 
                 if wallet_page:
                     popup_count += 1
-                    log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
                     try:
-                        await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2)
-
-                    has_pwd = False
-                    for frame in wallet_page.frames:
+                        log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
                         try:
-                            if await frame.locator('input[type="password"]').count() > 0:
-                                has_pwd = True
-                                break
+                            await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
                         except Exception:
-                            continue
+                            pass
+                        await asyncio.sleep(2)
 
-                    if has_pwd:
-                        log(account_id, "弹窗含密码框，执行解锁...")
-                        await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
-                        await asyncio.sleep(0.5)
-                        await _click_unlock_button(wallet_page, context, account_id)
-                    else:
-                        await _click_wallet_button(wallet_page, account_id)
+                        has_pwd = False
+                        for frame in wallet_page.frames:
+                            try:
+                                if await frame.locator('input[type="password"]').count() > 0:
+                                    has_pwd = True
+                                    break
+                            except Exception:
+                                continue
 
-                    log(account_id, f"弹窗已处理（第 {popup_count} 个）")
+                        if has_pwd:
+                            log(account_id, "弹窗含密码框，执行解锁...")
+                            await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+                            await asyncio.sleep(0.5)
+                            await _click_unlock_button(wallet_page, context, account_id)
+                        else:
+                            await _click_wallet_button(wallet_page, account_id)
+
+                        log(account_id, f"弹窗已处理（第 {popup_count} 个）")
+                    except Exception:
+                        log(account_id, f"弹窗处理中页面已关闭（第 {popup_count} 个），继续")
                     await asyncio.sleep(3)
                     continue
 
