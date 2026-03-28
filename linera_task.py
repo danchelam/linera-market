@@ -10,10 +10,11 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.3"
+__version__ = "2026.03.28.4"
 
 import asyncio
 import random
+import re
 import sys
 import os
 import json as _json
@@ -1636,6 +1637,21 @@ async def upload_trades(
 PORTAL_QUEST_URL = "https://portal.linera.net/quests?taskGuid=f8ee1b19-e787-49d4-b523-7d5b3452e261"
 
 
+async def _parse_cooldown(page: Page, account_id: str) -> int:
+    """解析 Cooldown 倒计时文本（如 '1:14' → 74 秒），失败返回 90"""
+    try:
+        cd_el = page.locator("text=Cooldown active").locator("..")
+        text = await cd_el.inner_text(timeout=5000)
+        m = re.search(r'(\d+):(\d+)', text)
+        if m:
+            secs = int(m.group(1)) * 60 + int(m.group(2))
+            log(account_id, f"Cooldown 剩余: {m.group(1)}:{m.group(2)} ({secs}s)")
+            return secs
+    except Exception:
+        pass
+    return 90
+
+
 async def claim_quest(
     page: Page, context: BrowserContext, account_id: str,
     popup_handler: WalletPopupHandler,
@@ -1801,87 +1817,116 @@ async def claim_quest(
                 break
             await asyncio.sleep(1)
 
-    # ── 点击 Claim ──
-    if await claim_btn.count() == 0:
-        log(account_id, "未找到 Claim 按钮，可能已经 Claim 过或未达标")
-        return False
-
-    try:
-        await claim_btn.first.click(timeout=5000)
-        log(account_id, "已点击 Claim，等待钱包签名...")
-        await asyncio.sleep(2)
-    except Exception as e:
-        log(account_id, f"点击 Claim 失败: {e}")
-        return False
-
-    # 手动处理 Claim 的钱包签名弹窗
+    # ── 点击 Claim（带 Cooldown 重试，最多 3 轮） ──
     success_loc = page.locator("p.text-sm.text-gray-700:has-text('Quest completed successfully')")
-    claim_done = False
-    for tick in range(60):
-        # 优先检测成功文本
+    cooldown_loc = page.locator("text=Cooldown active")
+
+    for claim_round in range(3):
+        claim_btn = page.locator("button:has-text('Claim')")
+
+        # 先检测是否已经成功（上轮可能延迟生效）
         try:
             if await success_loc.count() > 0:
-                claim_done = True
                 log(account_id, "检测到 Quest completed successfully!")
-                break
+                return True
         except Exception:
             pass
 
-        # 查找并处理钱包弹窗
-        wallet_page = None
-        for p in context.pages:
+        if await claim_btn.count() == 0:
+            # 没有 Claim 按钮 → 可能在 Cooldown 或已完成
+            if await cooldown_loc.count() > 0:
+                cd_secs = await _parse_cooldown(page, account_id)
+                if cd_secs > 0:
+                    log(account_id, f"Cooldown 中，等待 {cd_secs+5}s 后重试（第 {claim_round+1}/3 轮）...")
+                    await asyncio.sleep(cd_secs + 5)
+                    try:
+                        await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(5)
+                    except Exception:
+                        pass
+                    continue
+            log(account_id, "未找到 Claim 按钮，可能已经 Claim 过或未达标")
+            return False
+
+        try:
+            await claim_btn.first.click(timeout=5000)
+            log(account_id, f"已点击 Claim，等待签名...（第 {claim_round+1}/3 轮）")
+            await asyncio.sleep(2)
+        except Exception as e:
+            log(account_id, f"点击 Claim 失败: {e}")
+            return False
+
+        # 等待成功文本或处理钱包弹窗（60s）
+        claim_done = False
+        for tick in range(60):
             try:
-                if _is_wallet_popup(p.url or ""):
-                    wallet_page = p
+                if await success_loc.count() > 0:
+                    claim_done = True
+                    log(account_id, "检测到 Quest completed successfully!")
                     break
             except Exception:
+                pass
+
+            wallet_page = None
+            for p in context.pages:
+                try:
+                    if _is_wallet_popup(p.url or ""):
+                        wallet_page = p
+                        break
+                except Exception:
+                    continue
+
+            if wallet_page:
+                log(account_id, f"Claim 签名弹窗: {wallet_page.url[-60:]}")
+                try:
+                    await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+                await _click_wallet_button(wallet_page, account_id)
+                log(account_id, "Claim 签名已确认")
+                await asyncio.sleep(3)
                 continue
 
-        if wallet_page:
-            log(account_id, f"Claim 签名弹窗: {wallet_page.url[-60:]}")
-            try:
-                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-            await _click_wallet_button(wallet_page, account_id)
-            log(account_id, "Claim 签名已确认")
-            await asyncio.sleep(3)
-            continue
+            await asyncio.sleep(1)
 
-        await asyncio.sleep(1)
+        if claim_done:
+            log(account_id, "Claim Quest 成功")
+            return True
 
-    if claim_done:
-        log(account_id, "Claim Quest 成功")
-    else:
-        # 未检测到成功文本，再给一次机会：刷新页面检查 Claim 按钮状态
-        log(account_id, "60s 内未检测到成功提示，刷新页面确认...")
-        await _take_failure_screenshot(page, account_id, "claim_no_success_text")
+        # 未成功 → 截图 → 刷新检查 Cooldown
+        log(account_id, f"60s 内未检测到成功提示（第 {claim_round+1}/3 轮）")
+        await _take_failure_screenshot(page, account_id, f"claim_no_success_round{claim_round+1}")
         try:
             await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(5)
-            # 如果 Claim 按钮消失或变 disabled，说明其实已经成功了
-            fresh_claim = page.locator("button:has-text('Claim')")
-            for _ in range(10):
-                if await fresh_claim.count() > 0:
-                    is_disabled = await fresh_claim.first.get_attribute("disabled")
-                    if is_disabled is not None:
-                        claim_done = True
-                        log(account_id, "刷新后发现 Claim 按钮已 disabled，判定成功")
-                        break
-                    break
-                await asyncio.sleep(1)
-            else:
-                claim_done = True
-                log(account_id, "刷新后 Claim 按钮已消失，判定成功")
-        except Exception as e:
-            log(account_id, f"刷新确认失败: {e}")
+        except Exception:
+            pass
 
-        if not claim_done:
-            log(account_id, "Claim Quest 失败：未检测到成功标志")
-            await _take_failure_screenshot(page, account_id, "claim_failed_final")
+        # 刷新后再次检测成功标志
+        try:
+            if await success_loc.count() > 0:
+                log(account_id, "刷新后检测到 Quest completed successfully!")
+                return True
+        except Exception:
+            pass
 
-    return claim_done
+        # 检测 Cooldown → 等待后重试
+        if await cooldown_loc.count() > 0:
+            cd_secs = await _parse_cooldown(page, account_id)
+            if cd_secs > 0 and claim_round < 2:
+                log(account_id, f"Cooldown 中，等待 {cd_secs+5}s 后重试...")
+                await asyncio.sleep(cd_secs + 5)
+                try:
+                    await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(5)
+                except Exception:
+                    pass
+                continue
+
+    log(account_id, "Claim Quest 失败：3 轮均未检测到成功标志")
+    await _take_failure_screenshot(page, account_id, "claim_failed_final")
+    return False
 
 
 # ════════════════════════════════════════════════════════
