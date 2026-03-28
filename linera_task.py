@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.4"
+__version__ = "2026.03.28.5"
 
 import asyncio
 import random
@@ -650,6 +650,24 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
 
 
 # ════════════════════════════════════════════════════════
+#  清除浏览器缓存（Connection failed 反复出现时使用）
+# ════════════════════════════════════════════════════════
+
+async def _clear_browser_cache(page: Page, context: BrowserContext, account_id: str):
+    """清除 localStorage、sessionStorage 和 Cookie"""
+    try:
+        await page.evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}")
+        log(account_id, "已清除 localStorage / sessionStorage")
+    except Exception as e:
+        log(account_id, f"清除 storage 失败: {e}")
+    try:
+        await context.clear_cookies()
+        log(account_id, "已清除 Cookies")
+    except Exception as e:
+        log(account_id, f"清除 Cookies 失败: {e}")
+
+
+# ════════════════════════════════════════════════════════
 #  登录流程（禁用后台 handler，手动处理弹窗）
 # ════════════════════════════════════════════════════════
 
@@ -735,7 +753,22 @@ async def login(
         # Connection failed 可能在任意阶段出现，点 Retry 后状态可能回到 Connect Wallet
         login_done = False
         conn_fail_count = 0
-        for main_attempt in range(15):
+        cache_cleared_count = 0
+        for main_attempt in range(20):
+
+            # ── 连续 5 次 Connection failed → 清缓存重新加载 ──
+            if conn_fail_count > 0 and conn_fail_count % 5 == 0 and conn_fail_count // 5 > cache_cleared_count:
+                cache_cleared_count += 1
+                if cache_cleared_count <= 2:
+                    log(account_id, f"Connection failed 已达 {conn_fail_count} 次，清除缓存重新加载（第 {cache_cleared_count}/2 次）...")
+                    await _take_failure_screenshot(page, account_id, f"conn_fail_{conn_fail_count}x")
+                    await _clear_browser_cache(page, context, account_id)
+                    try:
+                        await page.goto(history_url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(8)
+                    continue
 
             # ── Phase A: 检查 Connection failed → 点 Retry ──
             retry_btn = page.locator("span.text-danger button")
