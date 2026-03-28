@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.2"
+__version__ = "2026.03.28.3"
 
 import asyncio
 import random
@@ -2064,20 +2064,33 @@ async def _linera_task_inner(
                 log(account_id, "补跑失败")
                 break
 
-        # 上传前最后确认
-        if not await navigate_to_history(page, account_id):
-            log(account_id, "上传前无法进入 History，中止上传")
-            return False
-        await asyncio.sleep(2)
-        final_trades = await get_trades_count(page, account_id)
-        if final_trades < 0:
-            log(account_id, "无法读取 Trades 数量，中止上传")
-            return False
-        if final_trades < target_total:
+        # 上传前最后确认（轮询等待链上确认）
+        final_trades = -1
+        for final_poll in range(6):
+            if not await navigate_to_history(page, account_id):
+                log(account_id, "上传前无法进入 History，中止上传")
+                return False
+            await asyncio.sleep(3)
+            final_trades = await get_trades_count(page, account_id)
+            if final_trades < 0:
+                log(account_id, "无法读取 Trades 数量，中止上传")
+                return False
+            _update_status(account_id, current_trades=final_trades)
+            if final_trades >= target_total:
+                log(account_id, f"笔数已达标，开始上传：Trades {final_trades} >= {target_total}")
+                break
+            if final_poll < 5:
+                log(account_id, f"Trades {final_trades}/{target_total}，等待链上确认（{final_poll+1}/6）...")
+                await asyncio.sleep(30)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+        else:
             log(account_id, f"Trades 仍不足 ({final_trades}/{target_total})，跳过上传")
             _update_status(account_id, status="failed", error=f"Trades不足 {final_trades}/{target_total}")
             return False
-        log(account_id, f"笔数已达标，开始上传：Trades {final_trades} >= {target_total}")
     else:
         log(account_id, "无 Trades 基线，跳过上传前校验")
 

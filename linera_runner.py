@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.28.2"
+__version__ = "2026.03.28.3"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
