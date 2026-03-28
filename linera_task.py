@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.1"
+__version__ = "2026.03.28.2"
 
 import asyncio
 import random
@@ -47,23 +47,26 @@ def _load_target_trades():
     global ACCOUNT_TARGET_TRADES
     if os.path.exists(_TARGET_TRADES_FILE):
         try:
-            mtime = os.path.getmtime(_TARGET_TRADES_FILE)
-            file_date = datetime.fromtimestamp(mtime).date()
-            today = datetime.now().date()
-            if file_date < today:
+            with open(_TARGET_TRADES_FILE, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            saved_date = data.get("_date", "")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if saved_date != today_str:
                 os.remove(_TARGET_TRADES_FILE)
                 ACCOUNT_TARGET_TRADES = {}
                 return
-            with open(_TARGET_TRADES_FILE, "r", encoding="utf-8") as f:
-                ACCOUNT_TARGET_TRADES = _json.load(f)
+            data.pop("_date", None)
+            ACCOUNT_TARGET_TRADES = data
         except Exception:
-            pass
+            ACCOUNT_TARGET_TRADES = {}
 
 
 def _save_target_trades():
     try:
+        data = dict(ACCOUNT_TARGET_TRADES)
+        data["_date"] = datetime.now().strftime("%Y-%m-%d")
         with open(_TARGET_TRADES_FILE, "w", encoding="utf-8") as f:
-            _json.dump(ACCOUNT_TARGET_TRADES, f, ensure_ascii=False)
+            _json.dump(data, f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -80,23 +83,26 @@ def _load_task_status():
     global TASK_STATUS
     if os.path.exists(_TASK_STATUS_FILE):
         try:
-            mtime = os.path.getmtime(_TASK_STATUS_FILE)
-            file_date = datetime.fromtimestamp(mtime).date()
-            today = datetime.now().date()
-            if file_date < today:
+            with open(_TASK_STATUS_FILE, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            saved_date = data.get("_date", "")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if saved_date != today_str:
                 os.remove(_TASK_STATUS_FILE)
                 TASK_STATUS = {}
                 return
-            with open(_TASK_STATUS_FILE, "r", encoding="utf-8") as f:
-                TASK_STATUS = _json.load(f)
+            data.pop("_date", None)
+            TASK_STATUS = data
         except Exception:
-            pass
+            TASK_STATUS = {}
 
 
 def _save_task_status():
     try:
+        data = dict(TASK_STATUS)
+        data["_date"] = datetime.now().strftime("%Y-%m-%d")
         with open(_TASK_STATUS_FILE, "w", encoding="utf-8") as f:
-            _json.dump(TASK_STATUS, f, ensure_ascii=False)
+            _json.dump(data, f, ensure_ascii=False)
     except Exception:
         pass
 
