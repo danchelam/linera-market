@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.7"
+__version__ = "2026.03.28.8"
 
 import asyncio
 import random
@@ -52,14 +52,20 @@ def _load_target_trades():
                 data = _json.load(f)
             saved_date = data.get("_date", "")
             today_str = datetime.now().strftime("%Y-%m-%d")
+            print(f"[日期检查] account_targets.json: _date={saved_date!r}, today={today_str!r}, 条目数={len(data)-1 if '_date' in data else len(data)}")
             if saved_date != today_str:
                 os.remove(_TARGET_TRADES_FILE)
                 ACCOUNT_TARGET_TRADES = {}
+                print(f"[日期检查] 已清除 account_targets.json（过期）")
                 return
             data.pop("_date", None)
             ACCOUNT_TARGET_TRADES = data
-        except Exception:
+            print(f"[日期检查] 加载今日进度: {len(data)} 条")
+        except Exception as e:
+            print(f"[日期检查] 加载失败: {e}，清空数据")
             ACCOUNT_TARGET_TRADES = {}
+    else:
+        print(f"[日期检查] account_targets.json 不存在，无需清除")
 
 
 def _save_target_trades():
@@ -73,6 +79,33 @@ def _save_target_trades():
 
 
 _load_target_trades()
+
+
+def reset_daily_data():
+    """由 runner 在每次启动任务时调用，确保过期数据被清除"""
+    global ACCOUNT_TARGET_TRADES, TASK_STATUS
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    for fpath, name in [(_TARGET_TRADES_FILE, "account_targets"), (_TASK_STATUS_FILE, "task_status")]:
+        if not os.path.exists(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            if data.get("_date", "") != today_str:
+                os.remove(fpath)
+                print(f"[reset_daily_data] 已清除 {name}.json（_date={data.get('_date', '无')}）")
+        except Exception:
+            try:
+                os.remove(fpath)
+            except Exception:
+                pass
+
+    if not os.path.exists(_TARGET_TRADES_FILE):
+        ACCOUNT_TARGET_TRADES = {}
+    if not os.path.exists(_TASK_STATUS_FILE):
+        TASK_STATUS = {}
+
 
 # 实时状态追踪：account_id → 状态字典（供 Web 前端展示，持久化到文件）
 TASK_STATUS: dict[str, dict] = {}

@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.28.7"
+__version__ = "2026.03.28.8"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -406,8 +406,10 @@ def run_batch_logic(thread_count, screenshot_mode=False, timelapse_mode=False):
         if timelapse_mode:
             log_emitter("【录制】定时截图模式已开启（每 3s 截图一次）")
 
-    # 每日清除进度文件（runner 层面兜底）
+    # 每日清除进度文件（双重保险）
     _clear_daily_files()
+    if hasattr(task_module, 'reset_daily_data'):
+        task_module.reset_daily_data()
 
     # 显示版本号
     tv = getattr(task_module, '__version__', '?')
