@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.29.1"
+__version__ = "2026.03.29.2"
 
 import asyncio
 import random
@@ -709,7 +709,7 @@ async def _clear_browser_cache(page: Page, context: BrowserContext, account_id: 
 #  OKX 钱包网络检测（确保在"所有网络"）
 # ════════════════════════════════════════════════════════
 
-async def _ensure_all_networks(wallet_page: Page, account_id: str) -> bool:
+async def _ensure_all_networks(wallet_page: Page, account_id: str, page: Page = None) -> bool:
     """解锁后检测 OKX 钱包是否在「所有网络」，如不是则切换。"""
     try:
         net_icon = wallet_page.locator('div[data-testid="home-page-networks-icon"]')
@@ -754,10 +754,24 @@ async def _ensure_all_networks(wallet_page: Page, account_id: str) -> bool:
             await all_net.first.click(timeout=5000)
             log(account_id, "已切换到「所有网络」")
             await asyncio.sleep(2)
-            return True
         else:
             log(account_id, "未找到「所有网络」选项")
             return False
+
+        # 切换完成后，需要在 dApp 页面重新点击 OKX Wallet 触发签名
+        if page:
+            await asyncio.sleep(2)
+            okx_btn = page.locator('button[data-testid="ListTile"]:has-text("OKX Wallet")')
+            if await okx_btn.count() == 0:
+                okx_btn = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
+            if await okx_btn.count() > 0:
+                await okx_btn.first.click(timeout=5000)
+                log(account_id, "已重新点击 OKX Wallet（触发签名）")
+                await asyncio.sleep(3)
+            else:
+                log(account_id, "dApp 页面未找到 OKX Wallet 按钮，跳过")
+
+        return True
     except Exception as e:
         log(account_id, f"网络检测异常: {e}")
         return True
@@ -834,7 +848,7 @@ async def login(
                 await _click_unlock_button(wallet_page, context, account_id)
                 await asyncio.sleep(3)
                 log(account_id, "钱包预解锁完成")
-                await _ensure_all_networks(wallet_page, account_id)
+                await _ensure_all_networks(wallet_page, account_id, page)
             else:
                 clicked = await _click_wallet_button(wallet_page, account_id)
                 if clicked:
@@ -1011,7 +1025,7 @@ async def login(
                             await _click_unlock_button(wallet_page, context, account_id)
                             await asyncio.sleep(3)
                             log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
-                            await _ensure_all_networks(wallet_page, account_id)
+                            await _ensure_all_networks(wallet_page, account_id, page)
                         else:
                             clicked = await _click_wallet_button(wallet_page, account_id)
                             if clicked:
@@ -1086,7 +1100,7 @@ async def login(
                             await asyncio.sleep(0.5)
                             await _click_unlock_button(wallet_page, context, account_id)
                             await asyncio.sleep(2)
-                            await _ensure_all_networks(wallet_page, account_id)
+                            await _ensure_all_networks(wallet_page, account_id, page)
                         else:
                             await _click_wallet_button(wallet_page, account_id)
 
