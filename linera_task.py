@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.8"
+__version__ = "2026.03.28.9"
 
 import asyncio
 import random
@@ -701,6 +701,52 @@ async def _clear_browser_cache(page: Page, context: BrowserContext, account_id: 
 
 
 # ════════════════════════════════════════════════════════
+#  OKX 钱包网络检测（确保在"所有网络"）
+# ════════════════════════════════════════════════════════
+
+async def _ensure_all_networks(wallet_page: Page, account_id: str) -> bool:
+    """解锁后检测 OKX 钱包是否在「所有网络」，如不是则切换。"""
+    try:
+        net_icon = wallet_page.locator('div[data-testid="home-page-networks-icon"]')
+        for _ in range(10):
+            if await net_icon.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+        if await net_icon.count() == 0:
+            return True
+
+        specific = net_icon.locator('div._wallet-icon__text_5gayk_73')
+        if await specific.count() == 0:
+            return True
+
+        net_text = await specific.inner_text(timeout=3000)
+        log(account_id, f"钱包当前网络: {net_text!r}，非「所有网络」，切换中...")
+
+        await net_icon.first.click(timeout=5000)
+        await asyncio.sleep(2)
+
+        all_net = wallet_page.locator('div._typography-text_129np_1:has-text("所有网络")')
+        if await all_net.count() == 0:
+            all_net = wallet_page.locator('text=所有网络')
+        for _ in range(10):
+            if await all_net.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+
+        if await all_net.count() > 0:
+            await all_net.first.click(timeout=5000)
+            log(account_id, "已切换到「所有网络」")
+            await asyncio.sleep(2)
+            return True
+        else:
+            log(account_id, "未找到「所有网络」选项")
+            return False
+    except Exception as e:
+        log(account_id, f"网络检测异常: {e}")
+        return True
+
+
+# ════════════════════════════════════════════════════════
 #  登录流程（禁用后台 handler，手动处理弹窗）
 # ════════════════════════════════════════════════════════
 
@@ -771,6 +817,7 @@ async def login(
                 await _click_unlock_button(wallet_page, context, account_id)
                 await asyncio.sleep(3)
                 log(account_id, "钱包预解锁完成")
+                await _ensure_all_networks(wallet_page, account_id)
             else:
                 clicked = await _click_wallet_button(wallet_page, account_id)
                 if clicked:
@@ -947,6 +994,7 @@ async def login(
                             await _click_unlock_button(wallet_page, context, account_id)
                             await asyncio.sleep(3)
                             log(account_id, f"钱包解锁弹窗已处理（第 {round_num+1} 轮）")
+                            await _ensure_all_networks(wallet_page, account_id)
                         else:
                             clicked = await _click_wallet_button(wallet_page, account_id)
                             if clicked:
@@ -1020,6 +1068,8 @@ async def login(
                             await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
                             await asyncio.sleep(0.5)
                             await _click_unlock_button(wallet_page, context, account_id)
+                            await asyncio.sleep(2)
+                            await _ensure_all_networks(wallet_page, account_id)
                         else:
                             await _click_wallet_button(wallet_page, account_id)
 
