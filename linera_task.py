@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.28.9"
+__version__ = "2026.03.29.1"
 
 import asyncio
 import random
@@ -18,7 +18,7 @@ import re
 import sys
 import os
 import json as _json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from playwright.async_api import Page, BrowserContext
 
@@ -39,6 +39,11 @@ DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
 TARGET_BETS = 21
 
+def _business_date() -> str:
+    """返回业务日期字符串。每日任务在 UTC 0:00（北京时间 8:00）重置。"""
+    return (datetime.now() - timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
 # 跨轮次进度记忆：account_id → 目标 Trades 总数（持久化到文件，跨重启继承）
 ACCOUNT_TARGET_TRADES: dict[str, int] = {}
 _TARGET_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "account_targets.json")
@@ -51,7 +56,7 @@ def _load_target_trades():
             with open(_TARGET_TRADES_FILE, "r", encoding="utf-8") as f:
                 data = _json.load(f)
             saved_date = data.get("_date", "")
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = _business_date()
             print(f"[日期检查] account_targets.json: _date={saved_date!r}, today={today_str!r}, 条目数={len(data)-1 if '_date' in data else len(data)}")
             if saved_date != today_str:
                 os.remove(_TARGET_TRADES_FILE)
@@ -71,7 +76,7 @@ def _load_target_trades():
 def _save_target_trades():
     try:
         data = dict(ACCOUNT_TARGET_TRADES)
-        data["_date"] = datetime.now().strftime("%Y-%m-%d")
+        data["_date"] = _business_date()
         with open(_TARGET_TRADES_FILE, "w", encoding="utf-8") as f:
             _json.dump(data, f, ensure_ascii=False)
     except Exception:
@@ -84,7 +89,7 @@ _load_target_trades()
 def reset_daily_data():
     """由 runner 在每次启动任务时调用，确保过期数据被清除"""
     global ACCOUNT_TARGET_TRADES, TASK_STATUS
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _business_date()
 
     for fpath, name in [(_TARGET_TRADES_FILE, "account_targets"), (_TASK_STATUS_FILE, "task_status")]:
         if not os.path.exists(fpath):
@@ -120,7 +125,7 @@ def _load_task_status():
             with open(_TASK_STATUS_FILE, "r", encoding="utf-8") as f:
                 data = _json.load(f)
             saved_date = data.get("_date", "")
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = _business_date()
             if saved_date != today_str:
                 os.remove(_TASK_STATUS_FILE)
                 TASK_STATUS = {}
@@ -134,7 +139,7 @@ def _load_task_status():
 def _save_task_status():
     try:
         data = dict(TASK_STATUS)
-        data["_date"] = datetime.now().strftime("%Y-%m-%d")
+        data["_date"] = _business_date()
         with open(_TASK_STATUS_FILE, "w", encoding="utf-8") as f:
             _json.dump(data, f, ensure_ascii=False)
     except Exception:
@@ -725,9 +730,21 @@ async def _ensure_all_networks(wallet_page: Page, account_id: str) -> bool:
         await net_icon.first.click(timeout=5000)
         await asyncio.sleep(2)
 
-        all_net = wallet_page.locator('div._typography-text_129np_1:has-text("所有网络")')
-        if await all_net.count() == 0:
-            all_net = wallet_page.locator('text=所有网络')
+        # 先点击「热门网络」标签页
+        hot_tab = wallet_page.locator(
+            'div[data-testid="network-management-page-chain-tabs-extension_wallet_network_tab_main_network"]'
+        )
+        for _ in range(10):
+            if await hot_tab.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+        if await hot_tab.count() > 0:
+            await hot_tab.first.click(timeout=5000)
+            log(account_id, "已点击「热门网络」标签")
+            await asyncio.sleep(2)
+
+        # 再点击「所有网络」选项
+        all_net = wallet_page.locator('text=所有网络')
         for _ in range(10):
             if await all_net.count() > 0:
                 break

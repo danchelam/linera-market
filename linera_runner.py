@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.28.9"
+__version__ = "2026.03.29.1"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -341,11 +341,16 @@ if base_module:
 
 _last_clear_date = ""
 
+def _business_date():
+    """业务日期：每日任务在 UTC 0:00（北京时间 8:00）重置"""
+    return (datetime.datetime.now() - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
 def _clear_daily_files():
     """检查并清除过期的进度文件，确保每天第一次启动时是干净的"""
     global _last_clear_date
     import json as _json
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today_str = _business_date()
     if _last_clear_date == today_str:
         return
     _last_clear_date = today_str
