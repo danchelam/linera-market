@@ -9,7 +9,7 @@ Linera Prediction Market — 启动器 + Web 控制台
   5. linera_runner.py 自身热更新后自动重启
 """
 
-__version__ = "2026.03.28.6"
+__version__ = "2026.03.28.7"
 
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO, emit
@@ -17,6 +17,7 @@ import subprocess
 import threading
 import asyncio
 import time
+import datetime
 import os
 import sys
 import importlib.util
@@ -335,6 +336,49 @@ if base_module:
     base_module.set_logger_callback(log_emitter)
 
 # ═══════════════════════════════════════════════
+#  每日清除进度文件（runner 层面兜底，不依赖 task 模块版本）
+# ═══════════════════════════════════════════════
+
+_last_clear_date = ""
+
+def _clear_daily_files():
+    """检查并清除过期的进度文件，确保每天第一次启动时是干净的"""
+    global _last_clear_date
+    import json as _json
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    if _last_clear_date == today_str:
+        return
+    _last_clear_date = today_str
+
+    base_dir = get_base_dir()
+    for fname in ("account_targets.json", "task_status.json"):
+        fpath = os.path.join(base_dir, fname)
+        if not os.path.exists(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            saved_date = data.get("_date", "")
+            if saved_date == today_str:
+                continue
+            os.remove(fpath)
+            log_emitter(f"【清除】{fname} 已过期（{saved_date or '无日期'}），已删除")
+        except Exception:
+            try:
+                os.remove(fpath)
+                log_emitter(f"【清除】{fname} 格式异常，已删除")
+            except Exception:
+                pass
+
+    # 同步清除 task 模块内存中的数据
+    if task_module:
+        if hasattr(task_module, 'ACCOUNT_TARGET_TRADES'):
+            task_module.ACCOUNT_TARGET_TRADES.clear()
+        if hasattr(task_module, 'TASK_STATUS'):
+            task_module.TASK_STATUS.clear()
+
+
+# ═══════════════════════════════════════════════
 #  任务执行逻辑（asyncio 在独立线程中运行）
 # ═══════════════════════════════════════════════
 
@@ -362,7 +406,10 @@ def run_batch_logic(thread_count, screenshot_mode=False, timelapse_mode=False):
         if timelapse_mode:
             log_emitter("【录制】定时截图模式已开启（每 3s 截图一次）")
 
-     # 显示版本号
+    # 每日清除进度文件（runner 层面兜底）
+    _clear_daily_files()
+
+    # 显示版本号
     tv = getattr(task_module, '__version__', '?')
     bv = getattr(base_module, '__version__', '?')
     log_emitter(f"【版本】linera_task: {tv} | base_module: {bv}")
