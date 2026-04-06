@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.03.29.2"
+__version__ = "2026.04.06.1"
 
 import asyncio
 import random
@@ -1886,8 +1886,9 @@ async def claim_quest(
                 await okx_text.first.click(timeout=5000)
                 log(account_id, f"已点击 OKX Wallet 文本（第 {okx_try+1} 次）")
             else:
-                log(account_id, "Portal 未找到 OKX Wallet 选项")
-                return False
+                log(account_id, f"Portal 未找到 OKX Wallet 选项（第 {okx_try+1}/5 次），重试...")
+                await asyncio.sleep(3)
+                continue
 
             # 等待钱包弹窗出现，最多 8 秒
             popup_found = False
@@ -2301,10 +2302,10 @@ async def _linera_task_inner(
     _update_status(account_id, status="claiming")
     claim_ok = await claim_quest(page, context, account_id, popup_handler)
     if not claim_ok:
-        log(account_id, "Claim Quest 未成功，但下注和上传已完成")
-        _update_status(account_id, status="done", error="Claim未成功")
-    else:
-        _update_status(account_id, status="done")
+        log(account_id, "Claim Quest 未成功，等待下轮补跑重试")
+        _update_status(account_id, status="failed", error="Claim未成功")
+        return False
+    _update_status(account_id, status="done")
     return True
 
 

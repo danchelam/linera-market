@@ -30,7 +30,7 @@ from playwright.async_api import (
     async_playwright, Browser, BrowserContext, Page, Playwright,
 )
 
-__version__ = "2026.03.29.2"
+__version__ = "2026.04.06.1"
 
 # ════════════════════════════════════════════════════════════
 #  全局配置（可在调用 run_batch 时覆盖）
@@ -1296,3 +1296,17 @@ async def run_batch(
                 tasks.append(asyncio.ensure_future(_run(acc)))
                 await asyncio.sleep(3)
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 第三轮补跑（主要针对 Claim 失败等需要 Cooldown 恢复的情况）
+        remaining = [a for a in accounts if not is_account_completed(a.id)]
+        if remaining and not STOP_FLAG:
+            log("SYSTEM", f"第三轮补跑前等待 120s（等待 Cooldown 恢复）...")
+            await asyncio.sleep(120)
+            remaining = [a for a in accounts if not is_account_completed(a.id)]
+            if remaining and not STOP_FLAG:
+                log("SYSTEM", f"第三轮补跑：{len(remaining)} 个")
+                tasks = []
+                for acc in remaining:
+                    tasks.append(asyncio.ensure_future(_run(acc)))
+                    await asyncio.sleep(3)
+                await asyncio.gather(*tasks, return_exceptions=True)
