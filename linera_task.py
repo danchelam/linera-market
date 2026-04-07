@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.07.1"
+__version__ = "2026.04.07.2"
 
 import asyncio
 import random
@@ -980,7 +980,27 @@ async def login(
 
                 popup_handler.enabled = True
                 if not okx_selected:
-                    log(account_id, "5 次尝试后仍未找到 OKX Wallet，跳过此账号")
+                    # OKX Wallet 5 次都找不到，可能是网络问题
+                    # 检查是否处于 Connection failed 状态，如果是则回主循环继续处理
+                    retry_btn_check = page.locator("span.text-danger button")
+                    if await retry_btn_check.count() > 0:
+                        conn_fail_count += 1
+                        log(account_id, f"OKX Wallet 加载失败，检测到 Connection failed（累计 {conn_fail_count} 次），回主循环重试...")
+                        continue
+                    # 不是 Connection failed → 尝试清缓存后重试一次
+                    if cache_cleared_count < 2:
+                        cache_cleared_count += 1
+                        conn_fail_count += 5  # 直接触发清缓存阈值
+                        log(account_id, f"OKX Wallet 反复加载失败，清除缓存重新加载（第 {cache_cleared_count}/2 次）...")
+                        await _take_failure_screenshot(page, account_id, f"okx_wallet_fail_{main_attempt}")
+                        await _clear_browser_cache(page, context, account_id)
+                        try:
+                            await page.goto(history_url, wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(8)
+                        continue
+                    log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
                     return False
 
                 # 处理连接后的钱包弹窗（解锁/连接/确认）
