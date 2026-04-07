@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.07.3"
+__version__ = "2026.04.07.4"
 
 import asyncio
 import random
@@ -896,6 +896,35 @@ async def login(
             # ── Phase B: 检测是否需要 Connect Wallet ──
             connect_btn = page.locator("button:has-text('Connect Wallet')")
             if await connect_btn.count() > 0:
+                # 先等转圈消失再点，否则会打断正在加载的连接
+                spin_loc = page.locator("svg.animate-spin")
+                if await spin_loc.count() > 0:
+                    log(account_id, "页面加载中（转圈），等待加载完成后再连接...")
+                    for _sw in range(180):
+                        if await spin_loc.count() == 0:
+                            break
+                        # 转圈过程中也要处理 Connection failed
+                        cf_btn = page.locator("span.text-danger button")
+                        if await cf_btn.count() > 0:
+                            conn_fail_count += 1
+                            log(account_id, f"等待中检测到 Connection failed，点击 Retry...（第 {conn_fail_count} 次）")
+                            try:
+                                await cf_btn.first.click(timeout=5000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(3)
+                            continue
+                        # Claiming chain
+                        claiming_chk = page.locator("span:text-is('Claiming chain...')")
+                        if await claiming_chk.count() > 0:
+                            await asyncio.sleep(1)
+                            continue
+                        await asyncio.sleep(1)
+                    # 转圈结束后重新检查状态，回主循环
+                    await asyncio.sleep(2)
+                    # 加载完可能已经登录成功了，或者变成了 Connection failed
+                    continue
+
                 popup_handler.enabled = False
                 okx_selected = False
                 for connect_try in range(5):
@@ -903,6 +932,19 @@ async def login(
                     if await connect_btn.count() == 0:
                         okx_selected = True
                         break
+
+                    # 再次确认没有转圈（每次重试前都检查）
+                    if await spin_loc.count() > 0:
+                        log(account_id, "检测到转圈，等待加载完成...")
+                        for _sw2 in range(60):
+                            if await spin_loc.count() == 0:
+                                break
+                            await asyncio.sleep(1)
+                        await asyncio.sleep(2)
+                        # 转圈结束后 Connect Wallet 可能消失了
+                        if await connect_btn.count() == 0:
+                            okx_selected = True
+                            break
 
                     log(account_id, f"检测到 Connect Wallet 按钮，开始连接...（第 {connect_try+1} 次）")
                     await connect_btn.first.click(timeout=5000)
