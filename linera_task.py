@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.08.5"
+__version__ = "2026.04.08.6"
 
 import asyncio
 import random
@@ -912,11 +912,11 @@ async def login(
         cache_cleared_count = 0
         for main_attempt in range(20):
 
-            # ── 连续 5 次 Connection failed → 清缓存重新加载 ──
-            if conn_fail_count > 0 and conn_fail_count % 5 == 0 and conn_fail_count // 5 > cache_cleared_count:
+            # ── 连续 3 次 Connection failed → 清缓存重新加载 ──
+            if conn_fail_count > 0 and conn_fail_count % 3 == 0 and conn_fail_count // 3 > cache_cleared_count:
                 cache_cleared_count += 1
-                if cache_cleared_count <= 2:
-                    log(account_id, f"Connection failed 已达 {conn_fail_count} 次，清除缓存重新加载（第 {cache_cleared_count}/2 次）...")
+                if cache_cleared_count <= 3:
+                    log(account_id, f"Connection failed 已达 {conn_fail_count} 次，清除缓存重新加载（第 {cache_cleared_count}/3 次）...")
                     await _take_failure_screenshot(page, account_id, f"conn_fail_{conn_fail_count}x")
                     await _clear_browser_cache(page, context, account_id)
                     try:
@@ -946,7 +946,8 @@ async def login(
                 if await spin_loc.count() > 0:
                     log(account_id, "页面加载中（转圈），等待加载完成后再连接...")
                     spin_wallet_handled = False
-                    for _sw in range(180):
+                    spin_cf_hit = False
+                    for _sw in range(120):
                         if await spin_loc.count() == 0:
                             break
                         # 转圈过程中检测钱包弹窗（可能在等解锁/签名）
@@ -985,25 +986,27 @@ async def login(
                                     break
                             except Exception:
                                 continue
-                        # 转圈过程中也要处理 Connection failed
+                        # 转圈过程中检测 Connection failed → 点 Retry 后立即跳出回主循环
                         cf_btn = page.locator("span.text-danger button")
                         if await cf_btn.count() > 0:
                             conn_fail_count += 1
-                            log(account_id, f"等待中检测到 Connection failed，点击 Retry...（第 {conn_fail_count} 次）")
+                            log(account_id, f"等待中检测到 Connection failed（第 {conn_fail_count} 次），跳出等待回主循环处理")
                             try:
                                 await cf_btn.first.click(timeout=5000)
                             except Exception:
                                 pass
                             await asyncio.sleep(3)
-                            continue
+                            spin_cf_hit = True
+                            break  # 跳出转圈循环，回主循环让清缓存逻辑判断
                         # Claiming chain
                         claiming_chk = page.locator("span:text-is('Claiming chain...')")
                         if await claiming_chk.count() > 0:
                             await asyncio.sleep(1)
                             continue
                         await asyncio.sleep(1)
-                    # 转圈结束后重新检查状态，回主循环
-                    await asyncio.sleep(2)
+                    # 回主循环
+                    if not spin_cf_hit:
+                        await asyncio.sleep(2)
                     continue
 
                 popup_handler.enabled = False
