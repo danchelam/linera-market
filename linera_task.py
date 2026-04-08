@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.08.3"
+__version__ = "2026.04.08.4"
 
 import asyncio
 import random
@@ -945,9 +945,46 @@ async def login(
                 spin_loc = page.locator("svg.animate-spin")
                 if await spin_loc.count() > 0:
                     log(account_id, "页面加载中（转圈），等待加载完成后再连接...")
+                    spin_wallet_handled = False
                     for _sw in range(180):
                         if await spin_loc.count() == 0:
                             break
+                        # 转圈过程中检测钱包弹窗（可能在等解锁/签名）
+                        for p in context.pages:
+                            try:
+                                if _is_wallet_popup(p.url or ""):
+                                    if not spin_wallet_handled:
+                                        log(account_id, f"转圈中发现钱包弹窗: {p.url.split('/')[-1]}")
+                                    try:
+                                        await p.wait_for_load_state("domcontentloaded", timeout=5000)
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(1)
+                                    has_pwd = False
+                                    for frame in p.frames:
+                                        try:
+                                            if await frame.locator('input[type="password"]').count() > 0:
+                                                has_pwd = True
+                                                break
+                                        except Exception:
+                                            continue
+                                    if has_pwd:
+                                        log(account_id, "弹窗含密码框，执行解锁...")
+                                        await _find_and_fill_password(p, context, account_id, OKX_DEFAULT_PASSWORD)
+                                        await asyncio.sleep(0.5)
+                                        await _click_unlock_button(p, context, account_id)
+                                        await asyncio.sleep(3)
+                                        try:
+                                            await _ensure_all_networks(p, account_id, page)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        await _click_wallet_button(p, account_id)
+                                    spin_wallet_handled = True
+                                    await asyncio.sleep(3)
+                                    break
+                            except Exception:
+                                continue
                         # 转圈过程中也要处理 Connection failed
                         cf_btn = page.locator("span.text-danger button")
                         if await cf_btn.count() > 0:
@@ -967,7 +1004,6 @@ async def login(
                         await asyncio.sleep(1)
                     # 转圈结束后重新检查状态，回主循环
                     await asyncio.sleep(2)
-                    # 加载完可能已经登录成功了，或者变成了 Connection failed
                     continue
 
                 popup_handler.enabled = False
@@ -984,6 +1020,35 @@ async def login(
                         for _sw2 in range(60):
                             if await spin_loc.count() == 0:
                                 break
+                            # 同时处理钱包弹窗
+                            for p in context.pages:
+                                try:
+                                    if _is_wallet_popup(p.url or ""):
+                                        try:
+                                            await p.wait_for_load_state("domcontentloaded", timeout=3000)
+                                        except Exception:
+                                            pass
+                                        await asyncio.sleep(1)
+                                        has_pwd = False
+                                        for frame in p.frames:
+                                            try:
+                                                if await frame.locator('input[type="password"]').count() > 0:
+                                                    has_pwd = True
+                                                    break
+                                            except Exception:
+                                                continue
+                                        if has_pwd:
+                                            log(account_id, "转圈中发现钱包需解锁...")
+                                            await _find_and_fill_password(p, context, account_id, OKX_DEFAULT_PASSWORD)
+                                            await asyncio.sleep(0.5)
+                                            await _click_unlock_button(p, context, account_id)
+                                            await asyncio.sleep(3)
+                                        else:
+                                            await _click_wallet_button(p, account_id)
+                                            await asyncio.sleep(2)
+                                        break
+                                except Exception:
+                                    continue
                             await asyncio.sleep(1)
                         await asyncio.sleep(2)
                         # 转圈结束后 Connect Wallet 可能消失了
