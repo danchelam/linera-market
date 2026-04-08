@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.08.1"
+__version__ = "2026.04.08.2"
 
 import asyncio
 import random
@@ -692,17 +692,62 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
 # ════════════════════════════════════════════════════════
 
 async def _clear_browser_cache(page: Page, context: BrowserContext, account_id: str):
-    """清除 localStorage、sessionStorage 和 Cookie"""
+    """彻底清除站点数据（Cookie + Storage + IndexedDB + CacheStorage），等同于手动清除"""
+    origins = [
+        "https://linera.market",
+        "https://app.dynamicauth.com",
+    ]
+
+    # 方式1: CDP 协议清除（最彻底，覆盖所有存储类型）
+    cdp_ok = False
     try:
-        await page.evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}")
-        log(account_id, "已清除 localStorage / sessionStorage")
+        cdp = await context.new_cdp_session(page)
+        # 清除所有 Cookie
+        await cdp.send("Network.clearBrowserCookies")
+        log(account_id, "已通过 CDP 清除所有 Cookies")
+        # 清除每个域名的完整站点数据
+        for origin in origins:
+            try:
+                await cdp.send("Storage.clearDataForOrigin", {
+                    "origin": origin,
+                    "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,websql",
+                })
+                log(account_id, f"已清除 {origin} 的全部站点数据")
+            except Exception as e:
+                log(account_id, f"清除 {origin} 站点数据失败: {e}")
+        await cdp.detach()
+        cdp_ok = True
     except Exception as e:
-        log(account_id, f"清除 storage 失败: {e}")
+        log(account_id, f"CDP 清除失败: {e}，回退到常规方式")
+
+    # 方式2: 常规 API 兜底
+    if not cdp_ok:
+        try:
+            await page.evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}")
+            log(account_id, "已清除 localStorage / sessionStorage")
+        except Exception as e:
+            log(account_id, f"清除 storage 失败: {e}")
+        try:
+            await context.clear_cookies()
+            log(account_id, "已清除 Cookies")
+        except Exception as e:
+            log(account_id, f"清除 Cookies 失败: {e}")
+
+    # 额外: JS 清除 IndexedDB 和 CacheStorage（针对当前域名）
     try:
-        await context.clear_cookies()
-        log(account_id, "已清除 Cookies")
-    except Exception as e:
-        log(account_id, f"清除 Cookies 失败: {e}")
+        await page.evaluate("""async () => {
+            try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}
+            try {
+                const dbs = await indexedDB.databases();
+                for (const db of dbs) { indexedDB.deleteDatabase(db.name); }
+            } catch(e) {}
+            try {
+                const keys = await caches.keys();
+                for (const k of keys) { await caches.delete(k); }
+            } catch(e) {}
+        }""")
+    except Exception:
+        pass
 
 
 # ════════════════════════════════════════════════════════
