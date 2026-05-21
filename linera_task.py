@@ -1902,10 +1902,12 @@ async def _click_and_sign(
         if STOP_FLAG:
             return False
         has_popup = False
+        wallet_p = None
         for p in context.pages:
             try:
                 if _is_wallet_popup(p.url or ""):
                     has_popup = True
+                    wallet_p = p
                     popup_seen = True
                     break
             except Exception:
@@ -1913,6 +1915,27 @@ async def _click_and_sign(
         if popup_seen and not has_popup:
             log(account_id, f"{label} {direction} 签名完成")
             return True
+        # 弹窗停留超过 5s，主动尝试处理
+        if has_popup and wallet_p and i > 0 and i % 5 == 0:
+            try:
+                has_pwd = False
+                for frame in wallet_p.frames:
+                    try:
+                        if await frame.locator('input[type="password"]').count() > 0:
+                            has_pwd = True
+                            break
+                    except Exception:
+                        continue
+                if has_pwd:
+                    log(account_id, "下注中检测到解锁弹窗，自动解锁...")
+                    await _find_and_fill_password(wallet_p, context, account_id, OKX_DEFAULT_PASSWORD)
+                    await asyncio.sleep(0.5)
+                    await _click_unlock_button(wallet_p, context, account_id)
+                    await asyncio.sleep(2)
+                else:
+                    await _click_wallet_button(wallet_p, account_id)
+            except Exception:
+                pass
         await asyncio.sleep(1)
 
     if not popup_seen:
