@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.04.08.6"
+__version__ = "2026.05.21.1"
 
 import asyncio
 import random
@@ -37,7 +37,9 @@ from base_module import (
 # ─── 页面配置 ─────────────────────────────────────────
 DAPP_URL = "https://linera.market"
 MARKETS = ["BTC", "ETH", "SOL"]
-TARGET_BETS = 21
+TARGET_PAIRS = 15
+TARGET_BETS = TARGET_PAIRS * 2  # 每对 = HIGHER + LOWER
+MARKET_DURATION = 3  # 3 minute 市场
 
 def _business_date() -> str:
     """返回业务日期字符串。每日任务在 UTC 0:00（北京时间 8:00）重置。"""
@@ -116,6 +118,47 @@ def reset_daily_data():
 TASK_STATUS: dict[str, dict] = {}
 _TASK_STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "task_status.json")
 _task_status_dirty = False
+
+# Weekly Reward 领取记录（account_id → ISO week string，如 "2026-W21"）
+_WEEKLY_CLAIM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_claim.json")
+WEEKLY_CLAIM_RECORD: dict[str, str] = {}
+
+
+def _current_iso_week() -> str:
+    """返回当前 ISO 周字符串，如 '2026-W21'"""
+    d = datetime.now()
+    year, week, _ = d.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _load_weekly_claim():
+    global WEEKLY_CLAIM_RECORD
+    if os.path.exists(_WEEKLY_CLAIM_FILE):
+        try:
+            with open(_WEEKLY_CLAIM_FILE, "r", encoding="utf-8") as f:
+                WEEKLY_CLAIM_RECORD = _json.load(f)
+        except Exception:
+            WEEKLY_CLAIM_RECORD = {}
+
+
+def _save_weekly_claim():
+    try:
+        with open(_WEEKLY_CLAIM_FILE, "w", encoding="utf-8") as f:
+            _json.dump(WEEKLY_CLAIM_RECORD, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _is_weekly_claimed(account_id: str) -> bool:
+    return WEEKLY_CLAIM_RECORD.get(account_id, "") == _current_iso_week()
+
+
+def _mark_weekly_claimed(account_id: str):
+    WEEKLY_CLAIM_RECORD[account_id] = _current_iso_week()
+    _save_weekly_claim()
+
+
+_load_weekly_claim()
 
 
 def _load_task_status():
@@ -511,6 +554,183 @@ async def recover_from_stuck(
 
 
 # ════════════════════════════════════════════════════════
+#  工具：下注金额控制
+# ════════════════════════════════════════════════════════
+
+BET_AMOUNT = "25"
+
+
+async def get_current_bet_amount(page: Page) -> str:
+    """读取 NEXT MARKET BET 区域中间显示的下注金额（齿轮图标左侧的大号数字）"""
+    # 方法1: JS 精确定位 — 齿轮 SVG 的前一个兄弟元素
+    try:
+        val = await page.evaluate("""() => {
+            // 找齿轮图标
+            const gears = document.querySelectorAll('svg');
+            for (const svg of gears) {
+                const cls = svg.getAttribute('class') || '';
+                if (cls.includes('settings') || cls.includes('sliders')) {
+                    // 齿轮前面的兄弟就是金额
+                    let prev = svg.parentElement.previousElementSibling;
+                    if (prev) {
+                        const t = prev.textContent.trim();
+                        if (/^[\\d.]+$/.test(t)) return t;
+                    }
+                    // 尝试齿轮父容器的前一个
+                    prev = svg.parentElement.parentElement
+                           ? svg.parentElement.parentElement.previousElementSibling
+                           : null;
+                    if (prev) {
+                        const t = prev.textContent.trim();
+                        if (/^[\\d.]+$/.test(t)) return t;
+                    }
+                }
+            }
+            return '';
+        }""")
+        if val:
+            return val
+    except Exception:
+        pass
+
+    # 方法2: 找 HIGHER 和 LOWER 按钮之间的区域里独立的金额数字
+    try:
+        val = await page.evaluate("""() => {
+            const label = Array.from(document.querySelectorAll('*'))
+                .find(el => el.textContent.trim() === 'NEXT MARKET BET' && el.children.length === 0);
+            if (!label) return '';
+            // label 的父容器下，找所有直接子元素中纯数字的
+            const container = label.parentElement;
+            if (!container) return '';
+            const children = container.querySelectorAll('*');
+            for (const c of children) {
+                if (c.children.length === 0) {
+                    const t = c.textContent.trim();
+                    // 纯数字且不含 x（排除倍率）不含 %
+                    if (/^\\d+(\\.\\d+)?$/.test(t) && !c.closest('button')) {
+                        // 排除 HIGHER/LOWER 按钮内的数字和小数倍率
+                        const fontSize = window.getComputedStyle(c).fontSize;
+                        const size = parseFloat(fontSize);
+                        if (size >= 18) return t;  // 金额数字通常比较大
+                    }
+                }
+            }
+            return '';
+        }""")
+        if val:
+            return val
+    except Exception:
+        pass
+
+    # 方法3: 输入框（面板已打开时）
+    try:
+        input_el = page.locator("input[type='number'], input[inputmode='decimal']").first
+        if await input_el.count() > 0:
+            val = await input_el.input_value(timeout=3000)
+            if val:
+                return val.strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def open_amount_panel(page: Page) -> bool:
+    """点击齿轮图标或金额区域打开修改面板"""
+    # 先检查面板是否已经打开
+    input_el = page.locator("input[type='number'], input[inputmode='decimal']").first
+    if await input_el.count() > 0:
+        return True
+
+    # 点击齿轮图标
+    selectors = [
+        "svg.lucide-settings-2",
+        "svg.lucide-sliders-horizontal",
+    ]
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                parent_btn = el.locator("..")
+                await parent_btn.click(timeout=3000)
+                await asyncio.sleep(1)
+                if await input_el.count() > 0:
+                    return True
+        except Exception:
+            continue
+
+    # 兜底：点击 NEXT MARKET BET 区域的金额数字
+    try:
+        bet_section = page.locator("text=NEXT MARKET BET").locator("..")
+        if await bet_section.count() > 0:
+            await bet_section.click(timeout=3000)
+            await asyncio.sleep(1)
+            if await input_el.count() > 0:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def set_bet_amount(page: Page, amount: str, account_id: str = "") -> bool:
+    """设置下注金额"""
+    if not await open_amount_panel(page):
+        if account_id:
+            log(account_id, "无法打开金额面板")
+        return False
+
+    try:
+        input_el = page.locator("input[type='number'], input[inputmode='decimal']").first
+        await input_el.click(timeout=3000)
+        # 全选后删除再填入
+        await input_el.press("Control+a")
+        await asyncio.sleep(0.2)
+        await input_el.fill(amount)
+        await asyncio.sleep(0.5)
+
+        await input_el.press("Enter")
+        await asyncio.sleep(1)
+
+        # 验证
+        current = await get_current_bet_amount(page)
+        target_num = float(amount)
+        if current:
+            try:
+                current_num = float(current)
+                if abs(current_num - target_num) < 0.01:
+                    if account_id:
+                        log(account_id, f"下注金额已设为 {amount}")
+                    return True
+            except ValueError:
+                pass
+
+        if account_id:
+            log(account_id, f"金额设置后验证: 期望 {amount}, 实际 {current}")
+        return current != ""
+    except Exception as e:
+        if account_id:
+            log(account_id, f"设置金额失败: {e}")
+        return False
+
+
+async def ensure_bet_amount(page: Page, account_id: str, target_amount: str = "") -> bool:
+    """检查并确保下注金额正确，不正确则自动修复"""
+    if not target_amount:
+        target_amount = BET_AMOUNT
+
+    current = await get_current_bet_amount(page)
+    if current:
+        try:
+            if abs(float(current) - float(target_amount)) < 0.01:
+                return True
+        except ValueError:
+            pass
+        log(account_id, f"当前金额 {current}，需要修改为 {target_amount}")
+
+    return await set_bet_amount(page, target_amount, account_id)
+
+
+# ════════════════════════════════════════════════════════
 #  工具：下注成功标志
 # ════════════════════════════════════════════════════════
 
@@ -604,33 +824,35 @@ async def get_pool_balance(page: Page) -> str:
 #  选择 1 minute 市场
 # ════════════════════════════════════════════════════════
 
-async def select_1_minute(page: Page, account_id: str, max_wait: int = 15) -> bool:
-    """选择 1 minute 市场，等待按钮加载最多 max_wait 秒"""
-    btn_loc = page.locator("button:text-is('1 minute')")
+async def select_duration(page: Page, account_id: str, duration: int = 0, max_wait: int = 15) -> bool:
+    """选择市场时长（1/3/5 minute），默认使用全局 MARKET_DURATION"""
+    if duration <= 0:
+        duration = MARKET_DURATION
+    label = f"{duration} minute"
+    btn_loc = page.locator(f"button:text-is('{label}')")
 
     for attempt in range(max_wait):
         try:
             if await btn_loc.count() > 0:
                 await btn_loc.first.click(timeout=5000)
-                log(account_id, "已选择 1 minute 市场")
+                log(account_id, f"已选择 {label} 市场")
                 await asyncio.sleep(2)
                 return True
         except Exception:
             pass
 
-        # JS 兜底
         try:
-            ok = await page.evaluate("""() => {
-                for (const btn of document.querySelectorAll('button')) {
-                    if (btn.textContent.trim() === '1 minute') {
+            ok = await page.evaluate(f"""() => {{
+                for (const btn of document.querySelectorAll('button')) {{
+                    if (btn.textContent.trim() === '{label}') {{
                         btn.click();
                         return true;
-                    }
-                }
+                    }}
+                }}
                 return false;
-            }""")
+            }}""")
             if ok:
-                log(account_id, "已选择 1 minute 市场 (JS)")
+                log(account_id, f"已选择 {label} 市场 (JS)")
                 await asyncio.sleep(2)
                 return True
         except Exception:
@@ -638,15 +860,20 @@ async def select_1_minute(page: Page, account_id: str, max_wait: int = 15) -> bo
 
         if attempt < max_wait - 1:
             if attempt == 0:
-                log(account_id, "1 minute 按钮未加载，等待中...")
+                log(account_id, f"{label} 按钮未加载，等待中...")
             await asyncio.sleep(1)
 
-    log(account_id, "1 minute 按钮等待超时")
+    log(account_id, f"{label} 按钮等待超时")
     return False
 
 
+async def select_1_minute(page: Page, account_id: str, max_wait: int = 15) -> bool:
+    """兼容旧调用"""
+    return await select_duration(page, account_id, duration=MARKET_DURATION, max_wait=max_wait)
+
+
 # ════════════════════════════════════════════════════════
-#  切换市场 + 重新选 1 minute
+#  切换市场 + 重新选时长
 # ════════════════════════════════════════════════════════
 
 async def switch_market(page: Page, account_id: str, market: str) -> bool:
@@ -661,13 +888,12 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
     except Exception as e:
         log(account_id, f"切换到 {market} 失败: {e}")
         return False
-    ok = await select_1_minute(page, account_id)
+    ok = await select_duration(page, account_id)
     if not ok:
-        # 1 minute 按钮加载失败，尝试切到另一个市场再回来
         other = [m for m in MARKETS if m != market]
         if other:
             alt = random.choice(other)
-            log(account_id, f"1 minute 不可用，先切到 {alt} 再切回 {market}")
+            log(account_id, f"{MARKET_DURATION} minute 不可用，先切到 {alt} 再切回 {market}")
             try:
                 alt_tab = page.locator(f"img[alt='{alt} icon']")
                 if await alt_tab.count() > 0:
@@ -683,7 +909,7 @@ async def switch_market(page: Page, account_id: str, market: str) -> bool:
                 await asyncio.sleep(2)
             except Exception:
                 pass
-            ok = await select_1_minute(page, account_id)
+            ok = await select_duration(page, account_id)
     return ok
 
 
@@ -1158,6 +1384,27 @@ async def login(
                     log(account_id, "多次尝试后仍未找到 OKX Wallet，跳过此账号")
                     return False
 
+                # ── 检测 QR 码界面（插件未注入） ──
+                await asyncio.sleep(2)
+                qr_detected = False
+                try:
+                    get_ext = page.locator("text='Get Extension'")
+                    copy_qr = page.locator("text='Copy QR URI'")
+                    if await get_ext.count() > 0 or await copy_qr.count() > 0:
+                        qr_detected = True
+                except Exception:
+                    pass
+                if qr_detected:
+                    log(account_id, "检测到 QR 码界面（OKX 插件未注入），刷新页面重试...")
+                    try:
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(1)
+                        await page.reload(wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(8)
+                    continue
+
                 # 处理连接后的钱包弹窗（解锁/连接/确认）
                 for round_num in range(5):
                     wallet_page = None
@@ -1228,6 +1475,44 @@ async def login(
             elif main_attempt == 0:
                 log(account_id, "已登录过，跳过 Connect Wallet 流程")
 
+            # ── Phase B½: 无论是否已登录，都要检查并处理可能存在的钱包弹窗 ──
+            for _wallet_check in range(10):
+                wp = None
+                for p in context.pages:
+                    try:
+                        if _is_wallet_popup(p.url or ""):
+                            wp = p
+                            break
+                    except Exception:
+                        continue
+                if not wp:
+                    break
+                log(account_id, f"检测到待处理钱包弹窗: {wp.url.split('/')[-1]}")
+                try:
+                    await wp.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+                has_pwd = False
+                for frame in wp.frames:
+                    try:
+                        if await frame.locator('input[type="password"]').count() > 0:
+                            has_pwd = True
+                            break
+                    except Exception:
+                        continue
+                if has_pwd:
+                    log(account_id, "弹窗含密码框，执行解锁...")
+                    await _find_and_fill_password(wp, context, account_id, OKX_DEFAULT_PASSWORD)
+                    await asyncio.sleep(0.5)
+                    await _click_unlock_button(wp, context, account_id)
+                    await asyncio.sleep(3)
+                    log(account_id, "钱包已解锁")
+                else:
+                    await _click_wallet_button(wp, account_id)
+                    log(account_id, "钱包弹窗已确认")
+                    await asyncio.sleep(3)
+
             # ── Phase C: 统一等待（弹窗 / Claiming chain / Connection failed / 转圈） ──
             await asyncio.sleep(2)
             claiming_loc = page.locator("span:text-is('Claiming chain...')")
@@ -1252,6 +1537,14 @@ async def login(
 
                 if wallet_page:
                     popup_count += 1
+                    if popup_count > 15:
+                        log(account_id, f"弹窗确认超过 15 次仍有新弹窗，放弃当前轮次，刷新重试...")
+                        try:
+                            await wallet_page.close()
+                        except Exception:
+                            pass
+                        need_outer_retry = True
+                        break
                     try:
                         log(account_id, f"发现钱包弹窗: {wallet_page.url[-60:]}")
                         try:
@@ -1284,6 +1577,23 @@ async def login(
                         log(account_id, f"弹窗处理中页面已关闭（第 {popup_count} 个），继续")
                     await asyncio.sleep(3)
                     continue
+
+                # "Something went wrong" 错误 → 刷新重试
+                try:
+                    err_loc = page.locator("text='Something went wrong'")
+                    if await err_loc.count() > 0:
+                        log(account_id, "检测到 'Something went wrong'，刷新重试...")
+                        try:
+                            await page.keyboard.press("Escape")
+                            await asyncio.sleep(1)
+                            await page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(8)
+                        need_outer_retry = True
+                        break
+                except Exception:
+                    pass
 
                 # Claiming chain
                 if await claiming_loc.count() > 0:
@@ -1507,6 +1817,181 @@ async def place_single_bet(
     return False
 
 
+async def get_round_id(page: Page) -> str:
+    """读取当前轮次时间段（如 '17:18 - 17:21'），用于判断是否已在该轮下过注"""
+    try:
+        return await page.evaluate("""() => {
+            const els = document.querySelectorAll('*');
+            for (const el of els) {
+                if (el.children.length === 0) {
+                    const t = (el.textContent || '').trim();
+                    if (/^\\d{2}:\\d{2}\\s*-\\s*\\d{2}:\\d{2}$/.test(t)) return t;
+                }
+            }
+            return '';
+        }""")
+    except Exception:
+        return ""
+
+
+async def has_existing_bets(page: Page, account_id: str = "") -> bool:
+    """检查当前轮次是否已下注：HIGHER/LOWER 按钮上方的金额 > 下注设置金额"""
+    try:
+        bet_amount = float(BET_AMOUNT)
+        # 读取 HIGHER 和 LOWER 按钮上方显示的金额
+        amounts = await page.evaluate("""() => {
+            const results = [];
+            // 方法1: 找 btn-higher 和 btn-lower 按钮附近的金额
+            const btns = document.querySelectorAll('button.btn-higher, button.btn-lower');
+            for (const btn of btns) {
+                const parent = btn.parentElement;
+                if (!parent) continue;
+                // 向上找到包含金额和倍率的容器
+                const container = parent.parentElement;
+                if (!container) continue;
+                const text = container.innerText || '';
+                // 匹配 "4.00" 后面跟 "x1.79" 的模式
+                const m = text.match(/([\\d.]+)\\s*x[\\d.]+/g);
+                if (m) {
+                    for (const match of m) {
+                        const val = parseFloat(match);
+                        if (!isNaN(val)) results.push(val);
+                    }
+                }
+            }
+            if (results.length > 0) return results;
+
+            // 方法2: 直接搜索 NEXT MARKET BET 后面的所有 "数字 x数字" 模式
+            const all = document.body.innerText || '';
+            const idx = all.indexOf('NEXT MARKET BET');
+            if (idx < 0) return [];
+            const after = all.substring(idx, idx + 200);
+            const matches = after.match(/([\\d.]+)\\s*x[\\d.]+/g);
+            if (!matches) return [];
+            return matches.map(m => parseFloat(m));
+        }""")
+        if not amounts or len(amounts) < 2:
+            return False
+        threshold = bet_amount * 0.8
+        for val in amounts:
+            if val >= threshold:
+                if account_id:
+                    log(account_id, f"[检测] 已有下注（金额 {val} >= 阈值 {threshold:.1f}）")
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def _click_and_sign(
+    page: Page, context: BrowserContext, account_id: str,
+    direction: str, label: str,
+) -> bool:
+    """点击 HIGHER/LOWER 按钮并等待钱包签名完成（弹窗消失），不等链上确认。"""
+    btn_cls = "btn-higher" if direction == "HIGHER" else "btn-lower"
+    try:
+        await page.locator(f"button.{btn_cls}").first.click(timeout=5000)
+        log(account_id, f"{label} 点击 {direction}")
+    except Exception as e:
+        log(account_id, f"{label} 点击 {direction} 失败: {e}")
+        return False
+
+    # 等待钱包弹窗出现并被自动签名（最多 30 秒）
+    popup_seen = False
+    for i in range(30):
+        if STOP_FLAG:
+            return False
+        has_popup = False
+        for p in context.pages:
+            try:
+                if _is_wallet_popup(p.url or ""):
+                    has_popup = True
+                    popup_seen = True
+                    break
+            except Exception:
+                continue
+        if popup_seen and not has_popup:
+            log(account_id, f"{label} {direction} 签名完成")
+            return True
+        await asyncio.sleep(1)
+
+    if not popup_seen:
+        log(account_id, f"{label} {direction} 30s 内无弹窗")
+        return False
+    log(account_id, f"{label} {direction} 签名超时")
+    return False
+
+
+async def place_bet_pair(
+    page: Page, context: BrowserContext, account_id: str,
+    pair_num: int, target_pairs: int,
+) -> bool | str:
+    """
+    在当前市场快速连续下 HIGHER + LOWER 一对：
+    点击 HIGHER → 签名 → 点击 LOWER → 签名 → 统一等待链上确认。
+    调用前需确保：按钮可用、倒计时充足、当前轮次未下注。
+    """
+    label = f"[{pair_num}/{target_pairs}]"
+
+    # 最后一道防线：下注前检查是否已有下注
+    if await has_existing_bets(page, account_id):
+        log(account_id, f"{label} 下注前检测到已有下注，跳过")
+        return "SIGNED"
+
+    baseline = await get_card_glass_count(page)
+    signed_count = 0  # 已完成签名的数量
+
+    # ── 快速连续下两注：HIGHER → 签名 → LOWER → 签名 ──
+    ok1 = await _click_and_sign(page, context, account_id, "HIGHER", label)
+    if not ok1:
+        await _take_failure_screenshot(page, account_id, f"pair{pair_num}_higher_fail")
+        return NO_POPUP_FAILURE
+    signed_count += 1
+
+    await asyncio.sleep(1)
+
+    # 等 LOWER 按钮再次可用
+    for w3 in range(10):
+        try:
+            lb = page.locator("button.btn-lower")
+            if await lb.count() > 0 and await lb.get_attribute("disabled") is None:
+                break
+        except Exception:
+            pass
+        if w3 == 9:
+            log(account_id, f"{label} LOWER 按钮不可用")
+            # HIGHER 已签名，标记为已签名以防重复下注
+            return "SIGNED"
+        await asyncio.sleep(1)
+
+    ok2 = await _click_and_sign(page, context, account_id, "LOWER", label)
+    if not ok2:
+        await _take_failure_screenshot(page, account_id, f"pair{pair_num}_lower_fail")
+        return "SIGNED"
+    signed_count += 1
+
+    # ── 统一等待链上确认（card-glass 增加 2） ──
+    log(account_id, f"{label} 两注已签名，等待链上确认...")
+    target_count = baseline + 2
+    for tick in range(30):
+        if STOP_FLAG:
+            return "SIGNED"
+        cur = await get_card_glass_count(page)
+        if cur >= target_count:
+            log(account_id, f"{label} 双向下注成功（card-glass {baseline} → {cur}）")
+            return True
+        await asyncio.sleep(1)
+
+    final = await get_card_glass_count(page)
+    if final > baseline:
+        log(account_id, f"{label} 部分确认（card-glass {baseline} → {final}），视为成功")
+        return True
+
+    # 签名已完成但链上未确认，仍视为"已签名"防止重复下注
+    log(account_id, f"{label} 30s 内链上未确认，但签名已完成")
+    return "SIGNED"
+
+
 # ════════════════════════════════════════════════════════
 #  钱包重连（下注期间掉线时使用）
 # ════════════════════════════════════════════════════════
@@ -1605,6 +2090,81 @@ async def reconnect_wallet(
 #  下注主循环
 # ════════════════════════════════════════════════════════
 
+async def _try_find_market(
+    page: Page, account_id: str, context: BrowserContext,
+    bet_records: dict, popup_handler: WalletPopupHandler,
+) -> str | None:
+    """
+    遍历所有市场，找到一个可以下注的（未结算完成、倒计时充足、本轮未下注）。
+    返回市场名或 None。
+    """
+    for market in MARKETS:
+        await switch_market(page, account_id, market)
+        await asyncio.sleep(1)
+
+        # 检查结算
+        if not await wait_settlement_done(page, account_id, context, timeout=5):
+            continue
+
+        # 检查按钮
+        try:
+            h = page.locator("button.btn-higher")
+            l = page.locator("button.btn-lower")
+            if not (await h.count() > 0 and await l.count() > 0
+                    and await h.get_attribute("disabled") is None
+                    and await l.get_attribute("disabled") is None):
+                continue
+        except Exception:
+            continue
+
+        # 检查倒计时
+        cd = await get_countdown_value(page)
+        if 0 < cd < 30:
+            log(account_id, f"{market} 倒计时 {cd}s < 30s，跳过")
+            continue
+
+        # 检查本轮是否已下注
+        # 方法1: 用轮次 ID 判断（内部记录）
+        round_id = await get_round_id(page)
+        if round_id and bet_records.get(market) == round_id:
+            log(account_id, f"{market} 本轮 {round_id} 已下注（bet_records），跳过")
+            continue
+        if not round_id:
+            log(account_id, f"{market} 未获取到 round_id，尝试 UI 检测")
+
+        # 方法2: 检查 UI 上是否已有下注（HIGHER/LOWER 旁金额 >= 设置金额）
+        if await has_existing_bets(page, account_id):
+            if round_id:
+                bet_records[market] = round_id
+            log(account_id, f"{market} UI 检测到已有下注，跳过")
+            continue
+
+        return market
+
+    return None
+
+
+async def _do_refresh_recovery(
+    page: Page, account_id: str, context: BrowserContext,
+    popup_handler: WalletPopupHandler,
+) -> bool:
+    """刷新页面并恢复钱包连接，失败返回 False"""
+    popup_handler.enabled = False
+    try:
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    await asyncio.sleep(5)
+    if not await wait_rpc_recovery(page, account_id, context):
+        popup_handler.enabled = True
+        return False
+    popup_handler.enabled = True
+    if not await reconnect_wallet(page, context, account_id, popup_handler):
+        await handle_wallet_popups_manual(context, account_id, timeout=15)
+    await asyncio.sleep(3)
+    return True
+
+
 async def run_betting_loop(
     page: Page,
     context: BrowserContext,
@@ -1612,95 +2172,101 @@ async def run_betting_loop(
     popup_handler: WalletPopupHandler,
     target_bets: int = TARGET_BETS,
 ) -> bool:
-    completed = 0
+    """
+    下注主循环：轮转 BTC/ETH/SOL 寻找可下注市场。
+    每对 = HIGHER + LOWER，下完一对立刻切到下一个市场继续。
+    所有市场都在当前轮次下完注后，等待任一市场新轮次开始。
+    """
+    target_pairs = target_bets // 2 if target_bets > 1 else target_bets
+    completed_pairs = 0
     consecutive_failures = 0
     consecutive_no_popup = 0
     total_failures = 0
     max_total_failures = 10
-    market_idx = 0
+    bet_records: dict[str, str] = {}   # {market: round_id}
 
-    log(account_id, f"开始下注，目标 {target_bets} 次")
+    log(account_id, f"开始下注，目标 {target_pairs} 对（{target_bets} 次），轮转 {'/'.join(MARKETS)}")
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
-    while completed < target_bets and not STOP_FLAG:
+    while completed_pairs < target_pairs and not STOP_FLAG:
         if total_failures >= max_total_failures:
-            log(account_id, f"累计失败 {total_failures} 次，放弃下注，等待第二轮重试")
+            log(account_id, f"累计失败 {total_failures} 次，放弃下注")
             await _take_failure_screenshot(page, account_id, "max_failures_reached")
             _update_status(account_id, status="failed", error=f"累计失败{total_failures}次")
             return False
 
-        # 连续 3 次无弹窗 → 页面卡住，刷新
         if consecutive_no_popup >= 3:
-            log(account_id, f"连续 {consecutive_no_popup} 次无弹窗，判定页面卡住，刷新...")
+            log(account_id, f"连续 {consecutive_no_popup} 次无弹窗，刷新...")
             await _take_failure_screenshot(page, account_id, "stuck_no_popup_3x")
-            popup_handler.enabled = False
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-            await asyncio.sleep(5)
-            if not await wait_rpc_recovery(page, account_id, context):
-                popup_handler.enabled = True
+            if not await _do_refresh_recovery(page, account_id, context, popup_handler):
                 return False
-            popup_handler.enabled = True
-            if not await reconnect_wallet(page, context, account_id, popup_handler):
-                await handle_wallet_popups_manual(context, account_id, timeout=15)
-            await asyncio.sleep(3)
             consecutive_no_popup = 0
             consecutive_failures = 0
+            bet_records.clear()
             continue
 
         if consecutive_failures >= 5:
-            log(account_id, f"连续失败 {consecutive_failures} 次，刷新页面...")
+            log(account_id, f"连续失败 {consecutive_failures} 次，刷新...")
             await _take_failure_screenshot(page, account_id, "consecutive_fail_5x")
-            popup_handler.enabled = False
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-            await asyncio.sleep(5)
-            if not await wait_rpc_recovery(page, account_id, context):
-                popup_handler.enabled = True
+            if not await _do_refresh_recovery(page, account_id, context, popup_handler):
                 return False
-            popup_handler.enabled = True
-            if not await reconnect_wallet(page, context, account_id, popup_handler):
-                await handle_wallet_popups_manual(context, account_id, timeout=15)
-            await asyncio.sleep(3)
             consecutive_failures = 0
+            bet_records.clear()
 
-        result = await place_single_bet(
-            page, context, account_id, completed + 1, target_bets,
+        # ── 寻找可下注市场 ──
+        market = await _try_find_market(page, account_id, context, bet_records, popup_handler)
+
+        if market is None:
+            # 所有市场都在当前轮次下完了或不可用，等待新一轮
+            log(account_id, "所有市场当前轮次已下注或不可用，等待新一轮...")
+            await asyncio.sleep(10)
+            bet_records.clear()
+            continue
+
+        log(account_id, f"在 {market} 下注（第 {completed_pairs+1}/{target_pairs} 对）")
+
+        # ── 前置检查 ──
+        if await is_fatal_error(page):
+            log(account_id, "RPC 致命错误")
+            return False
+        if await is_page_stuck(page):
+            await _take_failure_screenshot(page, account_id, "page_stuck")
+            if not await recover_from_stuck(page, account_id):
+                return False
+
+        # ── 下注 ──
+        result = await place_bet_pair(
+            page, context, account_id, completed_pairs + 1, target_pairs,
         )
 
+        # 只要签名完成（True 或 "SIGNED"），都记录 bet_records 防止重复下注
+        if result is True or result == "SIGNED":
+            round_id = await get_round_id(page)
+            if round_id:
+                bet_records[market] = round_id
+
         if result is True:
-            completed += 1
+            completed_pairs += 1
+            completed_bets = completed_pairs * 2
             consecutive_failures = 0
             consecutive_no_popup = 0
-            log(account_id, f"已完成 {completed}/{target_bets} 次下注")
-            _update_status(account_id, bets_completed=completed, error="")
+            log(account_id, f"已完成 {completed_pairs}/{target_pairs} 对（{completed_bets}/{target_bets} 次）")
+            _update_status(account_id, bets_completed=completed_bets, error="")
 
-            # 切换到下一个市场
-            if completed < target_bets:
-                market_idx = (market_idx + 1) % len(MARKETS)
-                next_market = MARKETS[market_idx]
-                await switch_market(page, account_id, next_market)
-
-                # 等待上一注的 card-glass 消失（上一轮结果清除）
-                card_glass_loc = page.locator("div.card-glass")
-                for cg_wait in range(30):
-                    if await card_glass_loc.count() == 0:
-                        break
-                    await asyncio.sleep(1)
-
-                if not await wait_rpc_recovery(page, account_id, context):
-                    return False
+        elif result == "SIGNED":
+            # 签名完成但链上未确认，算作成功（交易已提交）
+            completed_pairs += 1
+            completed_bets = completed_pairs * 2
+            consecutive_failures = 0
+            consecutive_no_popup = 0
+            log(account_id, f"已完成 {completed_pairs}/{target_pairs} 对（签名已提交，{completed_bets}/{target_bets} 次）")
+            _update_status(account_id, bets_completed=completed_bets, error="")
 
         elif result == NO_POPUP_FAILURE:
             consecutive_no_popup += 1
             consecutive_failures += 1
             total_failures += 1
-            log(account_id,
-                f"无弹窗失败（连续无弹窗: {consecutive_no_popup}/3，累计: {total_failures}/{max_total_failures}）")
+            log(account_id, f"无弹窗（连续: {consecutive_no_popup}/3，累计: {total_failures}/{max_total_failures}）")
             _update_status(account_id, error=f"无弹窗{consecutive_no_popup}/3")
             await asyncio.sleep(3)
         else:
@@ -1708,37 +2274,24 @@ async def run_betting_loop(
             consecutive_no_popup = 0
             total_failures += 1
 
-            # 立即检测钱包掉线：不用等连续5次，直接刷新重连
             connect_btn = page.locator("button:has-text('Connect Wallet')")
             if await connect_btn.count() > 0:
-                log(account_id, "检测到钱包掉线，立即刷新重连...")
-                popup_handler.enabled = False
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-                if not await wait_rpc_recovery(page, account_id, context):
-                    popup_handler.enabled = True
+                log(account_id, "钱包掉线，刷新重连...")
+                if not await _do_refresh_recovery(page, account_id, context, popup_handler):
                     return False
-                popup_handler.enabled = True
-                if not await reconnect_wallet(page, context, account_id, popup_handler):
-                    log(account_id, "钱包重连失败，放弃")
-                    return False
-                await asyncio.sleep(3)
                 consecutive_failures = 0
+                bet_records.clear()
                 continue
 
-            log(account_id,
-                f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}），等待后重试...")
+            log(account_id, f"下注失败（连续: {consecutive_failures}，累计: {total_failures}/{max_total_failures}）")
             _update_status(account_id, error=f"连续失败{consecutive_failures}次")
             await asyncio.sleep(5)
 
     if STOP_FLAG:
-        log(account_id, f"收到停止信号，已完成 {completed}/{target_bets} 次")
+        log(account_id, f"收到停止信号，已完成 {completed_pairs}/{target_pairs} 对")
         return False
 
-    log(account_id, f"全部 {target_bets} 次下注完成，等待 30s 让链上确认...")
+    log(account_id, f"全部 {target_pairs} 对下注完成，等待 30s 让链上确认...")
     await asyncio.sleep(30)
     return True
 
@@ -1960,25 +2513,256 @@ async def upload_trades(
 
 
 # ════════════════════════════════════════════════════════
-#  Claim Quest（Portal 领取任务奖励）
+#  Claim Quest（Portal Archetype 领取 — 新版 UI）
 # ════════════════════════════════════════════════════════
 
 PORTAL_QUEST_URL = "https://portal.linera.net/quests?taskGuid=f8ee1b19-e787-49d4-b523-7d5b3452e261"
+ARCHETYPE_NAMES = ["Achiever", "Socializer", "Killer", "Explorer"]
 
 
-async def _parse_cooldown(page: Page, account_id: str) -> int:
-    """解析 Cooldown 倒计时文本（如 '1:14' → 74 秒），失败返回 90"""
-    try:
-        cd_el = page.locator("text=Cooldown active").locator("..")
-        text = await cd_el.inner_text(timeout=5000)
-        m = re.search(r'(\d+):(\d+)', text)
+async def _portal_login(
+    page: Page, context: BrowserContext, account_id: str,
+) -> bool:
+    """Portal 页面登录（Sign in → OKX Wallet → 处理弹窗）"""
+    signin_btn = page.locator("button:has-text('Sign in')")
+    connect_btn = page.locator("button:has-text('Connect')")
+
+    need_login = False
+    for btn_loc in [signin_btn, connect_btn]:
+        if await btn_loc.count() > 0:
+            need_login = True
+            break
+    if not need_login:
+        return True
+
+    log(account_id, "Portal 未登录，开始签名登录...")
+    clicked = False
+    for btn_loc in [signin_btn, connect_btn]:
+        if await btn_loc.count() > 0:
+            try:
+                await btn_loc.first.click(timeout=5000)
+                clicked = True
+                break
+            except Exception:
+                pass
+    if not clicked:
+        try:
+            await page.evaluate("""() => {
+                for (const btn of document.querySelectorAll('button')) {
+                    if (btn.textContent.includes('Sign in') || btn.textContent.includes('Connect')) {
+                        btn.click(); return true;
+                    }
+                }
+                return false;
+            }""")
+            log(account_id, "已通过 JS 点击 Sign in")
+        except Exception as e:
+            log(account_id, f"点击 Sign in 失败: {e}")
+            return False
+    await asyncio.sleep(3)
+
+    # 选择 OKX Wallet
+    okx_clicked = False
+    for okx_try in range(5):
+        okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
+        okx_text = page.locator("text=OKX Wallet")
+        for _ in range(20):
+            if await okx_option.count() > 0 or await okx_text.count() > 0:
+                break
+            await asyncio.sleep(0.5)
+
+        if await okx_option.count() > 0:
+            await okx_option.first.click(timeout=5000)
+            log(account_id, f"已点击 OKX Wallet (Portal)（第 {okx_try+1} 次）")
+        elif await okx_text.count() > 0:
+            await okx_text.first.click(timeout=5000)
+            log(account_id, f"已点击 OKX Wallet 文本（第 {okx_try+1} 次）")
+        else:
+            log(account_id, f"Portal 未找到 OKX Wallet（第 {okx_try+1}/5 次），重试...")
+            await asyncio.sleep(3)
+            continue
+
+        popup_found = False
+        for _ in range(16):
+            for p in context.pages:
+                try:
+                    if _is_wallet_popup(p.url or ""):
+                        popup_found = True
+                        break
+                except Exception:
+                    continue
+            if popup_found:
+                break
+            await asyncio.sleep(0.5)
+        if popup_found:
+            okx_clicked = True
+            break
+        log(account_id, "点击 OKX Wallet 后未弹窗，重试...")
+        await asyncio.sleep(2)
+
+    if not okx_clicked:
+        log(account_id, "多次点击 OKX Wallet 均未弹窗，放弃")
+        return False
+
+    # 处理钱包弹窗（解锁 + 签名）
+    for tick in range(45):
+        wallet_page = None
+        for p in context.pages:
+            try:
+                u = p.url or ""
+            except Exception:
+                continue
+            if _is_wallet_popup(u):
+                wallet_page = p
+                break
+        if not wallet_page:
+            await asyncio.sleep(1)
+            continue
+
+        log(account_id, f"Portal 登录弹窗: {wallet_page.url[-60:]}")
+        try:
+            await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+        has_pwd = False
+        for frame in wallet_page.frames:
+            try:
+                if await frame.locator('input[type="password"]').count() > 0:
+                    has_pwd = True
+                    break
+            except Exception:
+                continue
+        if has_pwd:
+            await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
+            await asyncio.sleep(0.5)
+            await _click_unlock_button(wallet_page, context, account_id)
+            log(account_id, "Portal 钱包解锁完成")
+        else:
+            await _click_wallet_button(wallet_page, account_id)
+            log(account_id, "Portal 登录弹窗已处理")
+        await asyncio.sleep(3)
+
+    return True
+
+
+async def _find_best_archetype(page: Page, account_id: str) -> str | None:
+    """
+    扫描页面上的 4 个 Archetype 卡片，找到可领取且分数最高的那个。
+    返回 Archetype 名称（如 'Achiever'），无可领取时返回 None。
+    """
+    best_name = None
+    best_score = -1
+
+    for name in ARCHETYPE_NAMES:
+        name_loc = page.locator(f"text={name}").first
+        if await name_loc.count() == 0:
+            continue
+
+        try:
+            card = name_loc.locator("..").locator("..").locator("..")
+            card_text = await card.inner_text(timeout=3000)
+        except Exception:
+            continue
+
+        if "Not eligible" in card_text:
+            log(account_id, f"  {name}: Not eligible")
+            continue
+
+        card_claim = card.locator("button:has-text('Claim')")
+        if await card_claim.count() == 0:
+            log(account_id, f"  {name}: 无 Claim 按钮")
+            continue
+
+        score = -1
+        m = re.search(r'REWARD\s*\n?\s*(\d+)', card_text)
         if m:
-            secs = int(m.group(1)) * 60 + int(m.group(2))
-            log(account_id, f"Cooldown 剩余: {m.group(1)}:{m.group(2)} ({secs}s)")
-            return secs
-    except Exception:
-        pass
-    return 90
+            score = int(m.group(1))
+        log(account_id, f"  {name}: 可领取，分数 {score}")
+
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    return best_name
+
+
+async def _click_archetype_claim(page: Page, context: BrowserContext, account_id: str, archetype: str) -> bool:
+    """点击指定 Archetype 的 Claim 按钮，处理确认弹窗和钱包签名"""
+    name_loc = page.locator(f"text={archetype}").first
+    card = name_loc.locator("..").locator("..").locator("..")
+    claim_btn = card.locator("button:has-text('Claim')")
+
+    if await claim_btn.count() == 0:
+        log(account_id, f"{archetype} 的 Claim 按钮已消失")
+        return False
+
+    log(account_id, f"点击 {archetype} Claim...")
+    try:
+        await claim_btn.first.click(timeout=5000)
+    except Exception as e:
+        log(account_id, f"点击 {archetype} Claim 失败: {e}")
+        return False
+    await asyncio.sleep(3)
+
+    # 处理确认弹窗（"Claim XXX pts" 按钮）
+    claim_pts_btn = page.locator("button").filter(has_text="Claim").filter(has_text="pts")
+    for _ in range(10):
+        if await claim_pts_btn.count() > 0:
+            log(account_id, "检测到确认弹窗，点击 Claim pts...")
+            try:
+                await claim_pts_btn.first.click(timeout=5000)
+            except Exception:
+                pass
+            break
+        await asyncio.sleep(0.5)
+    else:
+        cancel_btn = page.locator("button:has-text('Cancel')")
+        if await cancel_btn.count() > 0:
+            sibling_claim = cancel_btn.locator("..").locator("button:has-text('Claim')")
+            if await sibling_claim.count() > 0:
+                log(account_id, "通过 Cancel 旁定位到确认按钮")
+                try:
+                    await sibling_claim.first.click(timeout=5000)
+                except Exception:
+                    pass
+    await asyncio.sleep(3)
+
+    # 处理钱包签名弹窗
+    success_loc = page.locator("text=Quest completed successfully")
+    for tick in range(60):
+        try:
+            if await success_loc.count() > 0:
+                log(account_id, f"{archetype} Claim 成功！（Quest completed successfully）")
+                return True
+        except Exception:
+            pass
+
+        wallet_page = None
+        for p in context.pages:
+            try:
+                if _is_wallet_popup(p.url or ""):
+                    wallet_page = p
+                    break
+            except Exception:
+                continue
+        if wallet_page:
+            log(account_id, f"Claim 签名弹窗: {wallet_page.url[-50:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            await _click_wallet_button(wallet_page, account_id)
+            log(account_id, "Claim 签名已确认")
+            await asyncio.sleep(3)
+            continue
+
+        await asyncio.sleep(1)
+
+    log(account_id, f"{archetype} Claim 60s 未检测到成功")
+    return False
 
 
 async def claim_quest(
@@ -1986,7 +2770,8 @@ async def claim_quest(
     popup_handler: WalletPopupHandler,
 ) -> bool:
     """
-    进入 Portal Quest 页面 → 检测登录状态 → 如需登录则走 OKX 签名 → 点 Claim → 签名
+    新版 Claim：进入 Portal → 登录 → 扫描 Archetype → 领取分数最高的可领取项。
+    每 UTC 日只能领一个 Archetype。
     """
     log(account_id, "开始 Claim Quest...")
 
@@ -2004,136 +2789,28 @@ async def claim_quest(
                 log(account_id, f"导航到 Portal 彻底失败: {e}")
                 return False
 
-    # ── 检测登录状态 ──
-    claim_btn = page.locator("button:has-text('Claim')")
-    signin_btn = page.locator("button:has-text('Sign in')")
-
+    # ── 检测登录状态，等待页面加载 ──
     for _ in range(15):
-        if await claim_btn.count() > 0:
-            break
-        if await signin_btn.count() > 0:
-            break
-        await asyncio.sleep(1)
-
-    # ── 未登录：点 Sign in → 选 OKX Wallet → 处理弹窗 → 重新进入 ──
-    if await signin_btn.count() > 0 and await claim_btn.count() == 0:
-        log(account_id, "Portal 未登录，开始签名登录...")
-        clicked_signin = False
-        try:
-            await signin_btn.first.wait_for(state="visible", timeout=10000)
-            await signin_btn.first.click(timeout=5000)
-            clicked_signin = True
-        except Exception:
-            pass
-        if not clicked_signin:
-            try:
-                await page.evaluate("""() => {
-                    for (const btn of document.querySelectorAll('button')) {
-                        if (btn.textContent.includes('Sign in')) {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-                clicked_signin = True
-                log(account_id, "已通过 JS 点击 Sign in")
-            except Exception as e:
-                log(account_id, f"点击 Sign in 失败: {e}")
-                return False
-        await asyncio.sleep(3)
-
-        # 选择 OKX Wallet（重试直到弹窗出现）
-        okx_clicked = False
-        for okx_try in range(5):
-            okx_option = page.locator("button.wallet-list-item__tile:has(img[alt='okxwallet'])")
-            okx_text = page.locator("text=OKX Wallet")
-
-            for _ in range(20):
-                if await okx_option.count() > 0 or await okx_text.count() > 0:
-                    break
-                await asyncio.sleep(0.5)
-
-            if await okx_option.count() > 0:
-                await okx_option.first.click(timeout=5000)
-                log(account_id, f"已点击 OKX Wallet (Portal)（第 {okx_try+1} 次）")
-            elif await okx_text.count() > 0:
-                await okx_text.first.click(timeout=5000)
-                log(account_id, f"已点击 OKX Wallet 文本（第 {okx_try+1} 次）")
-            else:
-                log(account_id, f"Portal 未找到 OKX Wallet 选项（第 {okx_try+1}/5 次），重试...")
-                await asyncio.sleep(3)
-                continue
-
-            # 等待钱包弹窗出现，最多 8 秒
-            popup_found = False
-            for _ in range(16):
-                for p in context.pages:
-                    try:
-                        if _is_wallet_popup(p.url or ""):
-                            popup_found = True
-                            break
-                    except Exception:
-                        continue
-                if popup_found:
-                    break
-                await asyncio.sleep(0.5)
-
-            if popup_found:
-                okx_clicked = True
+        for name in ARCHETYPE_NAMES:
+            if await page.locator(f"text={name}").count() > 0:
                 break
-            log(account_id, f"点击 OKX Wallet 后未弹窗，重试...")
-            await asyncio.sleep(2)
+        else:
+            signin_btn = page.locator("button:has-text('Sign in')")
+            connect_btn = page.locator("button:has-text('Connect')")
+            if await signin_btn.count() > 0 or await connect_btn.count() > 0:
+                break
+            await asyncio.sleep(1)
+            continue
+        break
 
-        if not okx_clicked:
-            log(account_id, "多次点击 OKX Wallet 均未弹窗，放弃")
+    # ── 未登录则执行 Portal 登录 ──
+    signin_btn = page.locator("button:has-text('Sign in')")
+    connect_btn = page.locator("button:has-text('Connect')")
+    if await signin_btn.count() > 0 or await connect_btn.count() > 0:
+        if not await _portal_login(page, context, account_id):
             return False
 
-        # 处理登录弹窗（解锁 + 签名），最多等 45 秒
-        for tick in range(45):
-            wallet_page = None
-            for p in context.pages:
-                try:
-                    u = p.url or ""
-                except Exception:
-                    continue
-                if _is_wallet_popup(u):
-                    wallet_page = p
-                    break
-
-            if not wallet_page:
-                await asyncio.sleep(1)
-                continue
-
-            log(account_id, f"Portal 登录弹窗: {wallet_page.url[-60:]}")
-            try:
-                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-
-            has_pwd = False
-            for frame in wallet_page.frames:
-                try:
-                    if await frame.locator('input[type="password"]').count() > 0:
-                        has_pwd = True
-                        break
-                except Exception:
-                    continue
-
-            if has_pwd:
-                await _find_and_fill_password(wallet_page, context, account_id, OKX_DEFAULT_PASSWORD)
-                await asyncio.sleep(0.5)
-                await _click_unlock_button(wallet_page, context, account_id)
-                log(account_id, "Portal 钱包解锁完成")
-            else:
-                await _click_wallet_button(wallet_page, account_id)
-                log(account_id, "Portal 登录弹窗已处理")
-
-            await asyncio.sleep(3)
-
-        # 登录完成后重新进入 Quest 页面
-        log(account_id, "Portal 登录完成，重新进入 Quest 页面...")
+        log(account_id, "Portal 登录完成，重新加载 Quest 页面...")
         try:
             await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(5)
@@ -2141,121 +2818,216 @@ async def claim_quest(
             log(account_id, f"重新进入 Quest 页面失败: {e}")
             return False
 
-        # 等待 Claim 按钮出现
-        for _ in range(15):
-            if await claim_btn.count() > 0:
+    # ── 等待 Archetype 卡片加载 ──
+    for _ in range(15):
+        for name in ARCHETYPE_NAMES:
+            if await page.locator(f"text={name}").count() > 0:
                 break
+        else:
             await asyncio.sleep(1)
+            continue
+        break
 
-    # ── 点击 Claim（带 Cooldown 重试，最多 3 轮） ──
-    success_loc = page.locator("p.text-sm.text-gray-700:has-text('Quest completed successfully')")
-    cooldown_loc = page.locator("text=Cooldown active")
+    # ── 扫描 Archetype，找最高分可领取的 ──
+    log(account_id, "扫描 Archetype 状态...")
+    best = await _find_best_archetype(page, account_id)
 
+    if best is None:
+        log(account_id, "所有 Archetype 均 Not eligible 或无 Claim 按钮")
+        return True
+
+    # ── 领取最佳 Archetype（带 Cooldown 重试，最多 3 轮） ──
     for claim_round in range(3):
-        claim_btn = page.locator("button:has-text('Claim')")
-
-        # 先检测是否已经成功（上轮可能延迟生效）
-        try:
-            if await success_loc.count() > 0:
-                log(account_id, "检测到 Quest completed successfully!")
-                return True
-        except Exception:
-            pass
-
-        if await claim_btn.count() == 0:
-            # 没有 Claim 按钮 → 可能在 Cooldown 或已完成
-            if await cooldown_loc.count() > 0:
-                cd_secs = await _parse_cooldown(page, account_id)
-                if cd_secs > 0:
-                    log(account_id, f"Cooldown 中，等待 {cd_secs+5}s 后重试（第 {claim_round+1}/3 轮）...")
-                    await asyncio.sleep(cd_secs + 5)
-                    try:
-                        await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
-                        await asyncio.sleep(5)
-                    except Exception:
-                        pass
-                    continue
-            log(account_id, "未找到 Claim 按钮，可能已经 Claim 过或未达标")
-            return False
-
-        try:
-            await claim_btn.first.click(timeout=5000)
-            log(account_id, f"已点击 Claim，等待签名...（第 {claim_round+1}/3 轮）")
-            await asyncio.sleep(2)
-        except Exception as e:
-            log(account_id, f"点击 Claim 失败: {e}")
-            return False
-
-        # 等待成功文本或处理钱包弹窗（60s）
-        claim_done = False
-        for tick in range(60):
-            try:
-                if await success_loc.count() > 0:
-                    claim_done = True
-                    log(account_id, "检测到 Quest completed successfully!")
-                    break
-            except Exception:
-                pass
-
-            wallet_page = None
-            for p in context.pages:
-                try:
-                    if _is_wallet_popup(p.url or ""):
-                        wallet_page = p
-                        break
-                except Exception:
-                    continue
-
-            if wallet_page:
-                log(account_id, f"Claim 签名弹窗: {wallet_page.url[-60:]}")
-                try:
-                    await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
-                await _click_wallet_button(wallet_page, account_id)
-                log(account_id, "Claim 签名已确认")
-                await asyncio.sleep(3)
-                continue
-
-            await asyncio.sleep(1)
-
-        if claim_done:
-            log(account_id, "Claim Quest 成功")
+        ok = await _click_archetype_claim(page, context, account_id, best)
+        if ok:
+            log(account_id, f"Archetype Claim 成功: {best}")
             return True
 
-        # 未成功 → 截图 → 刷新检查 Cooldown
-        log(account_id, f"60s 内未检测到成功提示（第 {claim_round+1}/3 轮）")
-        await _take_failure_screenshot(page, account_id, f"claim_no_success_round{claim_round+1}")
+        await _take_failure_screenshot(page, account_id, f"archetype_claim_round{claim_round+1}")
+
+        # 刷新检查 Cooldown
         try:
             await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(5)
         except Exception:
             pass
 
-        # 刷新后再次检测成功标志
+        # 检查成功标志
+        success_loc = page.locator("text=Quest completed successfully")
         try:
             if await success_loc.count() > 0:
-                log(account_id, "刷新后检测到 Quest completed successfully!")
+                log(account_id, "刷新后检测到成功标志！")
                 return True
         except Exception:
             pass
 
-        # 检测 Cooldown → 等待后重试
+        # 检查 Cooldown
+        cooldown_loc = page.locator("text=Cooldown active")
         if await cooldown_loc.count() > 0:
-            cd_secs = await _parse_cooldown(page, account_id)
-            if cd_secs > 0 and claim_round < 2:
-                log(account_id, f"Cooldown 中，等待 {cd_secs+5}s 后重试...")
-                await asyncio.sleep(cd_secs + 5)
+            try:
+                cd_el = cooldown_loc.locator("..")
+                text = await cd_el.inner_text(timeout=5000)
+                m = re.search(r'(\d+):(\d+)', text)
+                if m:
+                    cd_secs = int(m.group(1)) * 60 + int(m.group(2))
+                    log(account_id, f"Cooldown {m.group(1)}:{m.group(2)}，等待 {cd_secs+5}s（第 {claim_round+1}/3 轮）")
+                    await asyncio.sleep(cd_secs + 5)
+                else:
+                    await asyncio.sleep(95)
+            except Exception:
+                await asyncio.sleep(95)
+            try:
+                await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(5)
+            except Exception:
+                pass
+            continue
+
+        if claim_round < 2:
+            log(account_id, f"第 {claim_round+1} 轮未成功，重试...")
+
+    log(account_id, "Archetype Claim 失败：3 轮均未成功")
+    await _take_failure_screenshot(page, account_id, "archetype_claim_failed_final")
+    return False
+
+
+# ════════════════════════════════════════════════════════
+#  Weekly Reward 领取（每周一次）
+# ════════════════════════════════════════════════════════
+
+async def claim_weekly_reward(
+    page: Page, context: BrowserContext, account_id: str,
+    popup_handler: WalletPopupHandler,
+) -> bool:
+    """
+    在 Portal Quest 页面领取 Weekly Tier Reward。
+    每周只需领取一次，通过 weekly_claim.json 记录避免重复。
+    假设调用前已在 Portal Quest 页面且已登录。
+    """
+    if _is_weekly_claimed(account_id):
+        log(account_id, "Weekly Reward 本周已领取，跳过")
+        return True
+
+    log(account_id, "检查 Weekly Reward...")
+
+    # 确保在 Quest 页面
+    try:
+        current_url = page.url or ""
+        if "portal.linera.net" not in current_url:
+            await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+    except Exception:
+        pass
+
+    # 滚动到底部让 Weekly Reward 可见
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(1)
+
+    # 查找 Weekly Reward 区域
+    weekly_text = page.locator("text=Weekly Tier Reward")
+    if await weekly_text.count() == 0:
+        log(account_id, "未找到 Weekly Tier Reward 区域")
+        return False
+
+    # 检查是否已领取（显示 "CLAIMED THIS WEEK" 或 "Back next"）
+    claimed_marker = page.locator("text=CLAIMED THIS WEEK")
+    back_next = page.locator("text=Back next")
+    if await claimed_marker.count() > 0 or await back_next.count() > 0:
+        log(account_id, "Weekly Reward 已领取过（页面显示 Claimed）")
+        _mark_weekly_claimed(account_id)
+        return True
+
+    # 找到 Weekly 区域的 Claim 按钮
+    weekly_section = weekly_text.locator("..").locator("..")
+    weekly_claim_btn = weekly_section.locator("button:has-text('Claim')")
+    if await weekly_claim_btn.count() == 0:
+        log(account_id, "Weekly Reward 区域未找到 Claim 按钮")
+        return False
+
+    log(account_id, "点击 Weekly Reward Claim...")
+    try:
+        await weekly_claim_btn.first.click(timeout=5000)
+    except Exception as e:
+        log(account_id, f"点击 Weekly Claim 失败: {e}")
+        return False
+    await asyncio.sleep(3)
+
+    # 处理确认弹窗：点击 "Claim XXX pts" 红色按钮
+    claim_pts_btn = page.locator("button").filter(has_text="Claim").filter(has_text="pts")
+    for _ in range(10):
+        if await claim_pts_btn.count() > 0:
+            log(account_id, "检测到确认弹窗，点击 Claim pts...")
+            try:
+                await claim_pts_btn.first.click(timeout=5000)
+            except Exception:
+                pass
+            break
+        await asyncio.sleep(0.5)
+    else:
+        # 兜底：Cancel 按钮旁边的 Claim
+        cancel_btn = page.locator("button:has-text('Cancel')")
+        if await cancel_btn.count() > 0:
+            sibling_claim = cancel_btn.locator("..").locator("button:has-text('Claim')")
+            if await sibling_claim.count() > 0:
+                log(account_id, "通过 Cancel 旁定位到 Claim 确认按钮")
                 try:
-                    await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(5)
+                    await sibling_claim.first.click(timeout=5000)
                 except Exception:
                     pass
-                continue
 
-    log(account_id, "Claim Quest 失败：3 轮均未检测到成功标志")
-    await _take_failure_screenshot(page, account_id, "claim_failed_final")
+    await asyncio.sleep(3)
+
+    # 处理可能的钱包签名弹窗
+    for tick in range(30):
+        wallet_page = None
+        for p in context.pages:
+            try:
+                u = p.url or ""
+            except Exception:
+                continue
+            if _is_wallet_popup(u):
+                wallet_page = p
+                break
+
+        if wallet_page:
+            log(account_id, f"Weekly Claim 签名弹窗: {wallet_page.url[-50:]}")
+            try:
+                await wallet_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            await _click_wallet_button(wallet_page, account_id)
+            log(account_id, "Weekly Claim 签名已确认")
+            await asyncio.sleep(3)
+            break
+
+        # 检查是否已完成
+        if await claimed_marker.count() > 0 or await back_next.count() > 0:
+            break
+
+        await asyncio.sleep(1)
+
+    await asyncio.sleep(3)
+
+    # 验证领取结果
+    # 刷新页面确认
+    try:
+        await page.goto(PORTAL_QUEST_URL, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(5)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(1)
+    except Exception:
+        pass
+
+    claimed_marker = page.locator("text=CLAIMED THIS WEEK")
+    back_next = page.locator("text=Back next")
+    if await claimed_marker.count() > 0 or await back_next.count() > 0:
+        log(account_id, "Weekly Reward 领取成功！")
+        _mark_weekly_claimed(account_id)
+        return True
+
+    log(account_id, "Weekly Reward 领取结果不确定")
+    await _take_failure_screenshot(page, account_id, "weekly_claim_uncertain")
     return False
 
 
@@ -2317,6 +3089,10 @@ async def _linera_task_inner(
                 await upload_trades(page, context, account_id)
                 _update_status(account_id, status="claiming")
                 await claim_quest(page, context, account_id, popup_handler)
+                try:
+                    await claim_weekly_reward(page, context, account_id, popup_handler)
+                except Exception as e:
+                    log(account_id, f"Weekly Reward 异常（不影响任务）: {e}")
                 _update_status(account_id, status="done")
                 return True
             log(account_id, f"继承上轮进度: 当前 {initial_trades}，目标 {target_total}，还需 {remaining} 次")
@@ -2352,8 +3128,13 @@ async def _linera_task_inner(
     if not await wait_rpc_recovery(page, account_id, context):
         return False
 
-    await select_1_minute(page, account_id)
-    log(account_id, f"初始化完成，开始下注（目标 {target_bets} 次）")
+    await select_duration(page, account_id)
+
+    # ── Step 2.5: 启动时检查一次下注金额（全局生效，无需每次检查） ──
+    await ensure_bet_amount(page, account_id)
+
+    target_pairs = target_bets // 2 if target_bets > 1 else target_bets
+    log(account_id, f"初始化完成，开始下注（目标 {target_pairs} 对 / {target_bets} 次）")
 
     # ── Step 3: 下注 ──
     bet_ok = await run_betting_loop(
@@ -2429,7 +3210,7 @@ async def _linera_task_inner(
             await asyncio.sleep(3)
             if not await wait_rpc_recovery(page, account_id, context):
                 return False
-            await select_1_minute(page, account_id)
+            await select_duration(page, account_id)
             await asyncio.sleep(2)
 
             extra_ok = await run_betting_loop(
@@ -2480,6 +3261,13 @@ async def _linera_task_inner(
         log(account_id, "Claim Quest 未成功，等待下轮补跑重试")
         _update_status(account_id, status="failed", error="Claim未成功")
         return False
+
+    # ── Step 7: Weekly Reward（每周一次，失败不影响整体任务） ──
+    try:
+        await claim_weekly_reward(page, context, account_id, popup_handler)
+    except Exception as e:
+        log(account_id, f"Weekly Reward 领取异常（不影响任务完成）: {e}")
+
     _update_status(account_id, status="done")
     return True
 

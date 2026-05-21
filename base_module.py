@@ -672,7 +672,11 @@ async def _click_unlock_button(
     context: BrowserContext,
     account_id: str,
 ) -> bool:
-    """点击解锁/Unlock 按钮，优先搜索 iframe"""
+    """点击解锁/Unlock 按钮，等待解锁完成（弹窗关闭或 URL 变化）。
+    如果 15 秒内解锁按钮一直转圈，则诊断网络请求、关闭弹窗返回 False。
+    """
+    clicked = False
+
     # ── 在所有 frame 中搜索按钮 ──────────────
     for frame in wp.frames:
         for text in ("解锁", "Unlock"):
@@ -681,43 +685,148 @@ async def _click_unlock_button(
                 if await btn.count() > 0:
                     await btn.first.click()
                     log(account_id, f"已点击 [{text}]")
-                    return True
+                    clicked = True
+                    break
             except Exception:
                 continue
+        if clicked:
+            break
         for sel in ('button[type="submit"]', 'button[data-testid="okd-button"]'):
             try:
                 btn = frame.locator(sel)
                 if await btn.count() > 0:
                     await btn.first.click()
                     log(account_id, f"已点击 [{sel}]")
-                    return True
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if clicked:
+            break
+
+    # ── 兜底：JS 递归 ──────────────────────────
+    if not clicked:
+        for frame in wp.frames:
+            try:
+                js_ok = await frame.evaluate("""() => {
+                    const kw = ['解锁', 'Unlock'];
+                    for (const b of document.querySelectorAll('button')) {
+                        const t = (b.innerText || '').trim();
+                        if (kw.some(k => t.includes(k))) { b.click(); return true; }
+                    }
+                    const sub = document.querySelector('button[type="submit"]');
+                    if (sub) { sub.click(); return true; }
+                    return false;
+                }""")
+                if js_ok:
+                    log(account_id, "JS 点击解锁按钮成功")
+                    clicked = True
+                    break
             except Exception:
                 continue
 
-    # ── 兜底：JS 递归 ──────────────────────────
-    for frame in wp.frames:
+    if not clicked:
         try:
-            js_ok = await frame.evaluate("""() => {
-                const kw = ['解锁', 'Unlock'];
-                for (const b of document.querySelectorAll('button')) {
-                    const t = (b.innerText || '').trim();
-                    if (kw.some(k => t.includes(k))) { b.click(); return true; }
-                }
-                const sub = document.querySelector('button[type="submit"]');
-                if (sub) { sub.click(); return true; }
-                return false;
-            }""")
-            if js_ok:
-                log(account_id, "JS 点击解锁按钮成功")
-                return True
+            await wp.keyboard.press("Enter")
         except Exception:
-            continue
+            pass
+
+    # ── 网络诊断：监听钱包弹窗的请求 ──────────
+    import asyncio as _aio
+    failed_requests: list[str] = []
+    pending_requests: list[str] = []
+
+    def _on_request(req):
+        url = req.url or ""
+        if not url.startswith("chrome-extension://"):
+            pending_requests.append(url[:120])
+
+    def _on_response(resp):
+        url = resp.url or ""
+        if url in pending_requests:
+            try:
+                pending_requests.remove(url)
+            except ValueError:
+                pass
+
+    def _on_request_failed(req):
+        url = req.url or ""
+        failure = ""
+        try:
+            failure = req.failure or ""
+        except Exception:
+            pass
+        if not url.startswith("chrome-extension://"):
+            failed_requests.append(f"{url[:100]} | {failure}")
+            try:
+                pending_requests.remove(url[:120])
+            except (ValueError, Exception):
+                pass
 
     try:
-        await wp.keyboard.press("Enter")
+        wp.on("request", _on_request)
+        wp.on("response", _on_response)
+        wp.on("requestfailed", _on_request_failed)
     except Exception:
         pass
-    return True
+
+    # ── 等待解锁完成：弹窗关闭 / URL 不再含 unlock（最多 15 秒） ──
+    original_url = ""
+    try:
+        original_url = wp.url or ""
+    except Exception:
+        return True
+
+    for tick in range(15):
+        await _aio.sleep(1)
+        try:
+            current_url = wp.url or ""
+        except Exception:
+            log(account_id, "解锁弹窗已关闭（页面不可访问）")
+            return True
+
+        if wp.is_closed():
+            log(account_id, "解锁弹窗已关闭")
+            return True
+
+        if "unlock" not in current_url:
+            log(account_id, "解锁成功（URL 已变化）")
+            return True
+
+    # ── 超时：输出网络诊断信息 ──────────────────
+    if failed_requests:
+        log(account_id, f"[解锁诊断] 失败的网络请求 ({len(failed_requests)} 个):")
+        for fr in failed_requests[:5]:
+            log(account_id, f"  ✗ {fr}")
+    if pending_requests:
+        log(account_id, f"[解锁诊断] 仍在等待的请求 ({len(pending_requests)} 个):")
+        for pr in pending_requests[:5]:
+            log(account_id, f"  ⏳ {pr}")
+    if not failed_requests and not pending_requests:
+        log(account_id, "[解锁诊断] 无外部网络请求（可能是扩展内部卡死）")
+
+    # 如果有网络失败，尝试切换代理节点
+    if failed_requests or pending_requests:
+        log(account_id, "[解锁诊断] 检测到网络问题，尝试切换代理节点...")
+        try:
+            clash_manager.switch_to_best(account_id)
+        except Exception as e:
+            log(account_id, f"[解锁诊断] 切换节点失败: {e}")
+
+    # 移除监听器
+    try:
+        wp.remove_listener("request", _on_request)
+        wp.remove_listener("response", _on_response)
+        wp.remove_listener("requestfailed", _on_request_failed)
+    except Exception:
+        pass
+
+    log(account_id, "解锁超时（15s 转圈），关闭弹窗准备重试...")
+    try:
+        await wp.close()
+    except Exception:
+        pass
+    return False
 
 
 async def unlock_okx_wallet(
