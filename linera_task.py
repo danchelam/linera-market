@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.05.22.3"
+__version__ = "2026.05.22.4"
 
 import asyncio
 import random
@@ -2999,9 +2999,9 @@ async def claim_weekly_reward(
         log(account_id, "未找到 Weekly Tier Reward 区域")
         return False
 
-    # 检查是否已领取（显示 "CLAIMED THIS WEEK" 或 "Back next"）
+    # 检查是否已领取（显示 "CLAIMED THIS WEEK" 或 "Back next Tuesday"）
     claimed_marker = page.locator("text=CLAIMED THIS WEEK")
-    back_next = page.locator("text=Back next")
+    back_next = page.locator("span.text-emerald-700:has-text('Back next')")
     if await claimed_marker.count() > 0 or await back_next.count() > 0:
         log(account_id, "Weekly Reward 已领取过（页面显示 Claimed）")
         _mark_weekly_claimed(account_id)
@@ -3090,7 +3090,7 @@ async def claim_weekly_reward(
         pass
 
     claimed_marker = page.locator("text=CLAIMED THIS WEEK")
-    back_next = page.locator("text=Back next")
+    back_next = page.locator("span.text-emerald-700:has-text('Back next')")
     if await claimed_marker.count() > 0 or await back_next.count() > 0:
         log(account_id, "Weekly Reward 领取成功！")
         _mark_weekly_claimed(account_id)
@@ -3332,11 +3332,17 @@ async def _linera_task_inner(
         _update_status(account_id, status="failed", error="Claim未成功")
         return False
 
-    # ── Step 7: Weekly Reward（每周一次，失败不影响整体任务） ──
+    # ── Step 7: Weekly Reward（每周一次，必须确认成功） ──
     try:
-        await claim_weekly_reward(page, context, account_id, popup_handler)
+        weekly_ok = await claim_weekly_reward(page, context, account_id, popup_handler)
+        if not weekly_ok:
+            log(account_id, "Weekly Reward 领取未确认成功，不标记完成")
+            _update_status(account_id, status="failed", error="Weekly Reward未确认")
+            return False
     except Exception as e:
-        log(account_id, f"Weekly Reward 领取异常（不影响任务完成）: {e}")
+        log(account_id, f"Weekly Reward 领取异常: {e}")
+        _update_status(account_id, status="failed", error=f"Weekly异常:{e}")
+        return False
 
     _update_status(account_id, status="done")
     return True
