@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.05.21.2"
+__version__ = "2026.05.22.1"
 
 import asyncio
 import random
@@ -558,6 +558,19 @@ async def recover_from_stuck(
 # ════════════════════════════════════════════════════════
 
 BET_AMOUNT = "25"
+MIN_BALANCE = 50  # 余额低于此值暂停下注，等待回款
+
+
+async def get_user_balance(page: Page) -> float:
+    """读取右上角用户余额（如 209.39）"""
+    try:
+        el = page.locator("span.font-bold.text-foreground").first
+        if await el.count() > 0:
+            text = (await el.inner_text(timeout=3000)).strip().replace(",", "")
+            return float(text)
+    except Exception:
+        pass
+    return -1
 
 
 async def get_current_bet_amount(page: Page) -> str:
@@ -2212,6 +2225,24 @@ async def run_betting_loop(
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
     while completed_pairs < target_pairs and not STOP_FLAG:
+        # ── 余额检查：低于 MIN_BALANCE 暂停等待回款 ──
+        balance = await get_user_balance(page)
+        if balance >= 0 and balance < MIN_BALANCE:
+            log(account_id, f"余额不足（{balance:.2f} < {MIN_BALANCE}），暂停下注等待回款...")
+            _update_status(account_id, status="waiting_balance", error=f"余额{balance:.2f}<{MIN_BALANCE}")
+            for _wait in range(60):
+                if STOP_FLAG:
+                    return False
+                await asyncio.sleep(10)
+                balance = await get_user_balance(page)
+                if balance >= MIN_BALANCE:
+                    log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
+                    _update_status(account_id, status="betting", error="")
+                    break
+            else:
+                log(account_id, f"等待 10 分钟余额仍不足（{balance:.2f}），放弃")
+                return False
+
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注")
             await _take_failure_screenshot(page, account_id, "max_failures_reached")
