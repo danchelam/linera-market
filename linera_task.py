@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.05.22.2"
+__version__ = "2026.05.22.3"
 
 import asyncio
 import random
@@ -2134,6 +2134,24 @@ async def _try_find_market(
     遍历所有市场，找到一个可以下注的（未结算完成、倒计时充足、本轮未下注）。
     返回市场名或 None。
     """
+    # 先检查 Connection failed 状态
+    if await is_connection_failed(page):
+        log(account_id, "检测到 Connection failed，清除缓存并刷新...")
+        await _clear_browser_cache(page, context, account_id)
+        try:
+            await page.goto(
+                f"{DAPP_URL}/?market=BTC&duration={MARKET_DURATION}",
+                wait_until="domcontentloaded", timeout=30000,
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(8)
+        # 刷新后可能需要重新处理钱包连接
+        if await is_connection_failed(page):
+            log(account_id, "清缓存后仍 Connection failed，等待恢复...")
+            await asyncio.sleep(15)
+        return None
+
     for market in MARKETS:
         await switch_market(page, account_id, market)
         await asyncio.sleep(1)
