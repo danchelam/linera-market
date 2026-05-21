@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.05.22.1"
+__version__ = "2026.05.22.2"
 
 import asyncio
 import random
@@ -2229,7 +2229,6 @@ async def run_betting_loop(
         balance = await get_user_balance(page)
         if balance >= 0 and balance < MIN_BALANCE:
             log(account_id, f"余额不足（{balance:.2f} < {MIN_BALANCE}），暂停下注等待回款...")
-            _update_status(account_id, status="waiting_balance", error=f"余额{balance:.2f}<{MIN_BALANCE}")
             for _wait in range(60):
                 if STOP_FLAG:
                     return False
@@ -2237,7 +2236,6 @@ async def run_betting_loop(
                 balance = await get_user_balance(page)
                 if balance >= MIN_BALANCE:
                     log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
-                    _update_status(account_id, status="betting", error="")
                     break
             else:
                 log(account_id, f"等待 10 分钟余额仍不足（{balance:.2f}），放弃")
