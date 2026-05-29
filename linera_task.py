@@ -2276,23 +2276,9 @@ async def run_betting_loop(
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
     while completed_pairs < target_pairs and not STOP_FLAG:
-        # ── 余额检查：低于 100 切换 $1，低于 MIN_BALANCE 暂停等待 ──
+        # ── 余额检查：低于 100 切换 $1 继续下注 ──
         balance = await get_user_balance(page)
-        if balance >= 0 and balance < MIN_BALANCE:
-            log(account_id, f"余额不足（{balance:.2f} < {MIN_BALANCE}），暂停下注等待回款...")
-            for _wait in range(60):
-                if STOP_FLAG:
-                    return False
-                await asyncio.sleep(10)
-                balance = await get_user_balance(page)
-                if balance >= MIN_BALANCE:
-                    log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
-                    break
-            else:
-                log(account_id, f"等待 10 分钟余额仍不足（{balance:.2f}），放弃")
-                return False
-        elif balance >= 0 and balance < 100:
-            # 余额低于 100 但高于 MIN_BALANCE，切换到 $1
+        if balance >= 0 and balance < 100:
             current_amount = await get_current_bet_amount(page)
             if current_amount != "1":
                 log(account_id, f"余额较低（{balance:.2f} < 100），切换到 $1 下注")
