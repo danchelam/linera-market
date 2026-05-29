@@ -2258,6 +2258,7 @@ async def run_betting_loop(
     account_id: str,
     popup_handler: WalletPopupHandler,
     target_bets: int = TARGET_BETS,
+    use_small_bet: bool = False,
 ) -> bool:
     """
     下注主循环：轮转 BTC/ETH/SOL 寻找可下注市场。
@@ -2276,48 +2277,18 @@ async def run_betting_loop(
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
     while completed_pairs < target_pairs and not STOP_FLAG:
-        # ── 余额检查 ──
+        # ── 余额检查（策略在开窗口时已固定） ──
         balance = await get_user_balance(page)
         if balance >= 0:
-            if balance >= 100:
-                # 高余额用 $25，低于 50 暂停等回款
-                current_amount = await get_current_bet_amount(page)
-                if current_amount == "1":
-                    log(account_id, f"余额恢复到 {balance:.2f}，切回 $25 下注")
-                    await ensure_bet_amount(page, account_id, "25")
-            elif balance >= 50:
-                # 50-100 之间，用 $1
-                current_amount = await get_current_bet_amount(page)
-                if current_amount != "1":
-                    log(account_id, f"余额较低（{balance:.2f} < 100），切换到 $1 下注")
-                    await ensure_bet_amount(page, account_id, "1")
-            elif balance >= 5:
-                # 5-50 之间：如果当前是 $25 则暂停等回款，如果是 $1 则继续
-                current_amount = await get_current_bet_amount(page)
-                if current_amount != "1":
-                    # 用 $25 下到余额 < 50，暂停等回款
-                    log(account_id, f"余额不足（{balance:.2f} < 50），暂停等待回款...")
-                    for _wait in range(90):
-                        if STOP_FLAG:
-                            return False
-                        await asyncio.sleep(10)
-                        balance = await get_user_balance(page)
-                        if balance >= 50:
-                            log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
-                            break
-                    else:
-                        # 等了15分钟还没回到50，切$1继续
-                        log(account_id, f"等待 15 分钟余额仍 < 50（{balance:.2f}），切换 $1 继续")
-                        await ensure_bet_amount(page, account_id, "1")
-            else:
-                # 余额 < 5，暂停等回款
-                log(account_id, f"余额极低（{balance:.2f} < 5），暂停等待回款...")
+            pause_threshold = 5 if use_small_bet else 50
+            if balance < pause_threshold:
+                log(account_id, f"余额不足（{balance:.2f} < {pause_threshold}），暂停等待回款...")
                 for _wait in range(90):
                     if STOP_FLAG:
                         return False
                     await asyncio.sleep(10)
                     balance = await get_user_balance(page)
-                    if balance >= 5:
+                    if balance >= pause_threshold:
                         log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
                         break
                 else:
@@ -3278,12 +3249,14 @@ async def _linera_task_inner(
 
     await select_duration(page, account_id)
 
-    # ── Step 2.5: 根据余额决定下注金额 ──
+    # ── Step 2.5: 根据余额决定下注金额（开窗口时一次性判定） ──
     balance = await get_user_balance(page)
     if balance >= 0 and balance < 100:
+        use_small_bet = True
         log(account_id, f"余额较低（{balance:.2f} < 100），使用 $1 下注")
         await ensure_bet_amount(page, account_id, "1")
     else:
+        use_small_bet = False
         await ensure_bet_amount(page, account_id)
 
     target_pairs = target_bets // 2 if target_bets > 1 else target_bets
@@ -3292,6 +3265,7 @@ async def _linera_task_inner(
     # ── Step 3: 下注 ──
     bet_ok = await run_betting_loop(
         page, context, account_id, popup_handler, target_bets,
+        use_small_bet=use_small_bet,
     )
 
     if not bet_ok:
