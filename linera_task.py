@@ -2276,7 +2276,7 @@ async def run_betting_loop(
     _update_status(account_id, status="betting", bets_target=target_bets, bets_completed=0)
 
     while completed_pairs < target_pairs and not STOP_FLAG:
-        # ── 余额检查：低于 MIN_BALANCE 暂停等待回款 ──
+        # ── 余额检查：低于 100 切换 $1，低于 MIN_BALANCE 暂停等待 ──
         balance = await get_user_balance(page)
         if balance >= 0 and balance < MIN_BALANCE:
             log(account_id, f"余额不足（{balance:.2f} < {MIN_BALANCE}），暂停下注等待回款...")
@@ -2291,6 +2291,12 @@ async def run_betting_loop(
             else:
                 log(account_id, f"等待 10 分钟余额仍不足（{balance:.2f}），放弃")
                 return False
+        elif balance >= 0 and balance < 100:
+            # 余额低于 100 但高于 MIN_BALANCE，切换到 $1
+            current_amount = await get_current_bet_amount(page)
+            if current_amount != "1":
+                log(account_id, f"余额较低（{balance:.2f} < 100），切换到 $1 下注")
+                await ensure_bet_amount(page, account_id, "1")
 
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注")
@@ -3246,8 +3252,13 @@ async def _linera_task_inner(
 
     await select_duration(page, account_id)
 
-    # ── Step 2.5: 启动时检查一次下注金额（全局生效，无需每次检查） ──
-    await ensure_bet_amount(page, account_id)
+    # ── Step 2.5: 根据余额决定下注金额 ──
+    balance = await get_user_balance(page)
+    if balance >= 0 and balance < 100:
+        log(account_id, f"余额较低（{balance:.2f} < 100），使用 $1 下注")
+        await ensure_bet_amount(page, account_id, "1")
+    else:
+        await ensure_bet_amount(page, account_id)
 
     target_pairs = target_bets // 2 if target_bets > 1 else target_bets
     log(account_id, f"初始化完成，开始下注（目标 {target_pairs} 对 / {target_bets} 次）")
