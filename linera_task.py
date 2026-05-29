@@ -2836,11 +2836,15 @@ async def _click_archetype_claim(page: Page, context: BrowserContext, account_id
     await asyncio.sleep(3)
 
     # 处理钱包签名弹窗，等待成功标志
-    success_loc = page.locator("span.text-emerald-700:has-text('Back next')")
+    success_loc = page.locator("span:has-text('Claimed today')")
+    success_loc2 = page.locator("span.text-emerald-700:has-text('Back next')")
     old_success_loc = page.locator("text=Quest completed successfully")
     for tick in range(60):
         try:
             if await success_loc.count() > 0:
+                log(account_id, f"{archetype} Claim 成功！（Claimed today）")
+                return True
+            if await success_loc2.count() > 0:
                 log(account_id, f"{archetype} Claim 成功！（Back next Tuesday）")
                 return True
             if await old_success_loc.count() > 0:
@@ -2963,10 +2967,11 @@ async def claim_quest(
             pass
 
         # 检查成功标志
-        success_loc = page.locator("span.text-emerald-700:has-text('Back next')")
+        claimed_today = page.locator("span:has-text('Claimed today')")
+        back_next = page.locator("span.text-emerald-700:has-text('Back next')")
         old_success_loc = page.locator("text=Quest completed successfully")
         try:
-            if await success_loc.count() > 0 or await old_success_loc.count() > 0:
+            if await claimed_today.count() > 0 or await back_next.count() > 0 or await old_success_loc.count() > 0:
                 log(account_id, "刷新后检测到成功标志！")
                 return True
         except Exception:
