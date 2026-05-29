@@ -10,7 +10,7 @@ Linera Prediction Market 自动化任务 (Playwright 版本 2.0)
   6. 完成 15 次下注
 """
 
-__version__ = "2026.05.30.2"
+__version__ = "2026.05.30.3"
 
 import asyncio
 import random
