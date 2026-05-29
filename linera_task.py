@@ -3247,6 +3247,31 @@ async def _linera_task_inner(
     if not await wait_rpc_recovery(page, account_id, context):
         return False
 
+    # ── 导航后验证钱包连接状态 ──
+    await asyncio.sleep(2)
+    connect_btn = page.locator("button:has-text('Connect Wallet')")
+    if await connect_btn.count() > 0:
+        log(account_id, "市场页面检测到 Connect Wallet，钱包未连接，尝试重新连接...")
+        try:
+            await connect_btn.first.click(timeout=5000)
+            await asyncio.sleep(2)
+            # 选择 OKX Wallet
+            okx_btn = page.locator("button:has-text('OKX Wallet')")
+            if await okx_btn.count() > 0:
+                await okx_btn.first.click(timeout=5000)
+                log(account_id, "已选择 OKX Wallet")
+                await asyncio.sleep(3)
+            # 处理可能出现的钱包弹窗
+            await handle_wallet_popups_manual(context, account_id, timeout=15)
+            await asyncio.sleep(3)
+        except Exception as e:
+            log(account_id, f"市场页面重连钱包失败: {e}")
+        # 再次验证
+        if await connect_btn.count() > 0:
+            log(account_id, "市场页面钱包重连失败，Connect Wallet 仍存在")
+            _update_status(account_id, status="failed", error="市场页面钱包未连接")
+            return False
+
     await select_duration(page, account_id)
 
     # ── Step 2.5: 根据余额决定下注金额（开窗口时一次性判定） ──
