@@ -1487,6 +1487,27 @@ async def login(
 
             elif main_attempt == 0:
                 log(account_id, "已登录过，跳过 Connect Wallet 流程")
+                # 验证钱包是否真正连接：等待余额出现
+                await asyncio.sleep(3)
+                balance = await get_user_balance(page)
+                if balance < 0:
+                    # 余额不可读，可能页面有遮罩或钱包未真正连接
+                    log(account_id, "未检测到余额，等待页面完全加载...")
+                    await asyncio.sleep(5)
+                    # 再次检查是否出现了 Connect Wallet 按钮
+                    connect_btn = page.locator("button:has-text('Connect Wallet')")
+                    if await connect_btn.count() > 0:
+                        log(account_id, "延迟检测到 Connect Wallet 按钮，执行连接流程...")
+                        continue
+                    # 检查是否有 dynamic-modal 遮罩
+                    modal = page.locator("#dynamic-modal")
+                    if await modal.count() > 0:
+                        log(account_id, "检测到登录弹窗遮罩，按 Escape 关闭后重试...")
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(2)
+                        connect_btn = page.locator("button:has-text('Connect Wallet')")
+                        if await connect_btn.count() > 0:
+                            continue
 
             # ── Phase B½: 无论是否已登录，都要检查并处理可能存在的钱包弹窗 ──
             for _wallet_check in range(10):
@@ -1671,8 +1692,20 @@ async def login(
             await _take_failure_screenshot(page, account_id, "login_wallet_btn_still_exists")
             return False
 
-        # ── 在 History 页面读取 Trades 基线 ──
+        # ── 在 History 页面读取 Trades 基线（失败重试） ──
         initial_trades = await get_trades_count(page, account_id)
+        if initial_trades < 0:
+            log(account_id, "首次读取 Trades 失败，刷新重试...")
+            for _retry in range(2):
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+                initial_trades = await get_trades_count(page, account_id)
+                if initial_trades >= 0:
+                    break
+
         if initial_trades >= 0:
             log(account_id, f"登录完成，Trades 基线: {initial_trades}")
         else:
@@ -2776,8 +2809,11 @@ async def _click_archetype_claim(page: Page, context: BrowserContext, account_id
         return False
     await asyncio.sleep(3)
 
-    # 处理确认弹窗（"Claim XXX pts" 按钮）
-    claim_pts_btn = page.locator("button").filter(has_text="Claim").filter(has_text="pts")
+    # 确认弹窗中的 "Claim XXX pts" 按钮（红色背景）
+    claim_pts_btn = page.locator("button.bg-\\[\\#E10613\\]").filter(has_text="Claim").filter(has_text="pts")
+    if await claim_pts_btn.count() == 0:
+        # 兜底：任何包含 Claim 和 pts 的按钮
+        claim_pts_btn = page.locator("button").filter(has_text="Claim").filter(has_text="pts")
     for _ in range(10):
         if await claim_pts_btn.count() > 0:
             log(account_id, "检测到确认弹窗，点击 Claim pts...")
@@ -2799,12 +2835,16 @@ async def _click_archetype_claim(page: Page, context: BrowserContext, account_id
                     pass
     await asyncio.sleep(3)
 
-    # 处理钱包签名弹窗
-    success_loc = page.locator("text=Quest completed successfully")
+    # 处理钱包签名弹窗，等待成功标志
+    success_loc = page.locator("span.text-emerald-700:has-text('Back next')")
+    old_success_loc = page.locator("text=Quest completed successfully")
     for tick in range(60):
         try:
             if await success_loc.count() > 0:
-                log(account_id, f"{archetype} Claim 成功！（Quest completed successfully）")
+                log(account_id, f"{archetype} Claim 成功！（Back next Tuesday）")
+                return True
+            if await old_success_loc.count() > 0:
+                log(account_id, f"{archetype} Claim 成功！（Quest completed）")
                 return True
         except Exception:
             pass
@@ -2923,9 +2963,10 @@ async def claim_quest(
             pass
 
         # 检查成功标志
-        success_loc = page.locator("text=Quest completed successfully")
+        success_loc = page.locator("span.text-emerald-700:has-text('Back next')")
+        old_success_loc = page.locator("text=Quest completed successfully")
         try:
-            if await success_loc.count() > 0:
+            if await success_loc.count() > 0 or await old_success_loc.count() > 0:
                 log(account_id, "刷新后检测到成功标志！")
                 return True
         except Exception:
@@ -3318,7 +3359,20 @@ async def _linera_task_inner(
             _update_status(account_id, status="failed", error=f"Trades不足 {final_trades}/{target_total}")
             return False
     else:
-        log(account_id, "无 Trades 基线，跳过上传前校验")
+        # 无基线时强制读取当前 Trades 确认已下注
+        log(account_id, "无 Trades 基线，强制读取当前 Trades 数量校验...")
+        if not await navigate_to_history(page, account_id):
+            log(account_id, "无法进入 History 页面")
+            return False
+        await asyncio.sleep(3)
+        final_trades = await get_trades_count(page, account_id)
+        if final_trades < 0:
+            log(account_id, "无法读取 Trades 数量，中止上传")
+            return False
+        if final_trades < 30:
+            log(account_id, f"Trades 数量不足（{final_trades} < 30），中止上传")
+            return False
+        log(account_id, f"Trades 数量确认: {final_trades}，继续上传")
 
     # ── Step 5: 上传 ──
     _update_status(account_id, status="uploading")
