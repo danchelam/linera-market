@@ -3265,7 +3265,7 @@ async def _linera_task_inner(
             await asyncio.sleep(3)
             last_trades = -1
             stable_count = 0
-            for poll in range(6):
+            for poll in range(30):
                 cur_trades = await get_trades_count(page, account_id)
                 if cur_trades < 0:
                     log(account_id, "无法读取 Trades 数量")
