@@ -2279,8 +2279,38 @@ async def run_betting_loop(
         # ── 余额检查 ──
         balance = await get_user_balance(page)
         if balance >= 0:
-            if balance < 5:
-                # 余额极低，暂停等待回款
+            if balance >= 100:
+                # 高余额用 $25，低于 50 暂停等回款
+                current_amount = await get_current_bet_amount(page)
+                if current_amount == "1":
+                    log(account_id, f"余额恢复到 {balance:.2f}，切回 $25 下注")
+                    await ensure_bet_amount(page, account_id, "25")
+            elif balance >= 50:
+                # 50-100 之间，用 $1
+                current_amount = await get_current_bet_amount(page)
+                if current_amount != "1":
+                    log(account_id, f"余额较低（{balance:.2f} < 100），切换到 $1 下注")
+                    await ensure_bet_amount(page, account_id, "1")
+            elif balance >= 5:
+                # 5-50 之间：如果当前是 $25 则暂停等回款，如果是 $1 则继续
+                current_amount = await get_current_bet_amount(page)
+                if current_amount != "1":
+                    # 用 $25 下到余额 < 50，暂停等回款
+                    log(account_id, f"余额不足（{balance:.2f} < 50），暂停等待回款...")
+                    for _wait in range(90):
+                        if STOP_FLAG:
+                            return False
+                        await asyncio.sleep(10)
+                        balance = await get_user_balance(page)
+                        if balance >= 50:
+                            log(account_id, f"余额已恢复（{balance:.2f}），继续下注")
+                            break
+                    else:
+                        # 等了15分钟还没回到50，切$1继续
+                        log(account_id, f"等待 15 分钟余额仍 < 50（{balance:.2f}），切换 $1 继续")
+                        await ensure_bet_amount(page, account_id, "1")
+            else:
+                # 余额 < 5，暂停等回款
                 log(account_id, f"余额极低（{balance:.2f} < 5），暂停等待回款...")
                 for _wait in range(90):
                     if STOP_FLAG:
@@ -2293,11 +2323,6 @@ async def run_betting_loop(
                 else:
                     log(account_id, f"等待 15 分钟余额仍不足（{balance:.2f}），放弃")
                     return False
-            if balance < 100:
-                current_amount = await get_current_bet_amount(page)
-                if current_amount != "1":
-                    log(account_id, f"余额较低（{balance:.2f} < 100），切换到 $1 下注")
-                    await ensure_bet_amount(page, account_id, "1")
 
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注")
