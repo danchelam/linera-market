@@ -2185,6 +2185,15 @@ async def _try_find_market(
             await asyncio.sleep(15)
         return None
 
+    # 检查钱包是否断连
+    connect_btn = page.locator("button:has-text('Connect Wallet')")
+    if await connect_btn.count() > 0:
+        log(account_id, "下注中检测到钱包断连，尝试重连...")
+        ok = await reconnect_wallet(page, context, account_id, popup_handler)
+        if not ok:
+            log(account_id, "钱包重连失败")
+        return None
+
     for market in MARKETS:
         await switch_market(page, account_id, market)
         await asyncio.sleep(1)
@@ -2197,11 +2206,18 @@ async def _try_find_market(
         try:
             h = page.locator("button.btn-higher")
             l = page.locator("button.btn-lower")
-            if not (await h.count() > 0 and await l.count() > 0
-                    and await h.get_attribute("disabled") is None
-                    and await l.get_attribute("disabled") is None):
+            h_count = await h.count()
+            l_count = await l.count()
+            if h_count == 0 or l_count == 0:
+                log(account_id, f"{market} 按钮不存在（HIGHER={h_count}, LOWER={l_count}）")
                 continue
-        except Exception:
+            h_disabled = await h.get_attribute("disabled")
+            l_disabled = await l.get_attribute("disabled")
+            if h_disabled is not None or l_disabled is not None:
+                log(account_id, f"{market} 按钮被禁用")
+                continue
+        except Exception as e:
+            log(account_id, f"{market} 按钮检测异常: {e}")
             continue
 
         # 检查倒计时
@@ -2269,6 +2285,7 @@ async def run_betting_loop(
     completed_pairs = 0
     consecutive_failures = 0
     consecutive_no_popup = 0
+    consecutive_no_market = 0
     total_failures = 0
     max_total_failures = 10
     bet_records: dict[str, str] = {}   # {market: round_id}
@@ -2294,6 +2311,11 @@ async def run_betting_loop(
                 else:
                     log(account_id, f"等待 15 分钟余额仍不足（{balance:.2f}），放弃")
                     return False
+                # 余额恢复后验证钱包连接
+                connect_btn = page.locator("button:has-text('Connect Wallet')")
+                if await connect_btn.count() > 0:
+                    log(account_id, "余额恢复后检测到钱包断连，重连...")
+                    await reconnect_wallet(page, context, account_id, popup_handler)
 
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注")
@@ -2323,12 +2345,18 @@ async def run_betting_loop(
         market = await _try_find_market(page, account_id, context, bet_records, popup_handler)
 
         if market is None:
-            # 所有市场都在当前轮次下完了或不可用，等待新一轮
-            log(account_id, "所有市场当前轮次已下注或不可用，等待新一轮...")
+            consecutive_no_market += 1
+            if consecutive_no_market >= 10:
+                log(account_id, f"连续 {consecutive_no_market} 轮找不到可用市场，刷新页面...")
+                await _do_refresh_recovery(page, account_id, context, popup_handler)
+                consecutive_no_market = 0
+            else:
+                log(account_id, "所有市场当前轮次已下注或不可用，等待新一轮...")
             await asyncio.sleep(10)
             bet_records.clear()
             continue
 
+        consecutive_no_market = 0
         log(account_id, f"在 {market} 下注（第 {completed_pairs+1}/{target_pairs} 对）")
 
         # ── 前置检查 ──
@@ -3276,6 +3304,10 @@ async def _linera_task_inner(
 
     # ── Step 2.5: 根据余额决定下注金额（开窗口时一次性判定） ──
     balance = await get_user_balance(page)
+    if balance >= 0 and balance < 2:
+        log(account_id, f"余额极低（{balance:.2f} < 2），跳过此账号")
+        _update_status(account_id, status="skipped", error="余额不足")
+        return False
     if balance >= 0 and balance < 100:
         use_small_bet = True
         log(account_id, f"余额较低（{balance:.2f} < 100），使用 $1 下注")

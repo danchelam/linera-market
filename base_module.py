@@ -1240,30 +1240,30 @@ class WalletPopupHandler:
 
         await asyncio.sleep(random.uniform(1.0, 2.5))
 
-        # 检查是否是解锁弹窗（含密码框）
+        # 检查是否是解锁弹窗（只有 #/unlock 页面才检查密码框）
         try:
-            has_pwd = False
-            for frame in page.frames:
-                try:
-                    if await frame.locator('input[type="password"]').count() > 0:
-                        has_pwd = True
-                        break
-                except Exception:
-                    continue
-            if has_pwd:
-                log(self.account_id, "弹窗含密码框，自动解锁...")
-                await _find_and_fill_password(page, self.context, self.account_id, OKX_DEFAULT_PASSWORD)
-                await asyncio.sleep(0.5)
-                await _click_unlock_button(page, self.context, self.account_id)
-                await asyncio.sleep(3)
-                log(self.account_id, "钱包已自动解锁")
-                # 解锁后页面可能变为确认页，继续尝试点确认
-                try:
-                    if not page.is_closed():
-                        await _click_wallet_button(page, self.account_id)
-                except Exception:
-                    pass
-                return
+            if "#/unlock" in url:
+                has_pwd = False
+                for frame in page.frames:
+                    try:
+                        if await frame.locator('input[type="password"]').count() > 0:
+                            has_pwd = True
+                            break
+                    except Exception:
+                        continue
+                if has_pwd:
+                    log(self.account_id, "弹窗含密码框，自动解锁...")
+                    await _find_and_fill_password(page, self.context, self.account_id, OKX_DEFAULT_PASSWORD)
+                    await asyncio.sleep(0.5)
+                    await _click_unlock_button(page, self.context, self.account_id)
+                    await asyncio.sleep(3)
+                    log(self.account_id, "钱包已自动解锁")
+                    try:
+                        if not page.is_closed():
+                            await _click_wallet_button(page, self.account_id)
+                    except Exception:
+                        pass
+                    return
         except Exception as e:
             log(self.account_id, f"解锁检测异常: {e}")
 
