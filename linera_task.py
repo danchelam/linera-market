@@ -2287,6 +2287,7 @@ async def run_betting_loop(
     consecutive_no_popup = 0
     consecutive_no_market = 0
     total_failures = 0
+    total_no_popup = 0
     max_total_failures = 10
     bet_records: dict[str, str] = {}   # {market: round_id}
 
@@ -2316,6 +2317,49 @@ async def run_betting_loop(
                 if await connect_btn.count() > 0:
                     log(account_id, "余额恢复后检测到钱包断连，重连...")
                     await reconnect_wallet(page, context, account_id, popup_handler)
+
+        # ── 累计 10 次无弹窗 → 清缓存重登录同步余额 ──
+        if total_no_popup >= 10:
+            log(account_id, f"累计 {total_no_popup} 次无弹窗，清缓存重新登录同步余额...")
+            await _clear_browser_cache(page, context, account_id)
+            history_url = f"{DAPP_URL}/history"
+            try:
+                await page.goto(history_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            if not await login(page, context, account_id, popup_handler):
+                log(account_id, "重登录失败")
+                return False
+            market_url = f"{DAPP_URL}/?market=BTC&duration={MARKET_DURATION}"
+            try:
+                await page.goto(market_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            log(account_id, "等待余额同步...")
+            last_balance = -1.0
+            stable_count = 0
+            for _sync in range(12):
+                balance = await get_user_balance(page)
+                if balance > 0 and abs(balance - last_balance) < 0.01:
+                    stable_count += 1
+                    if stable_count >= 2:
+                        log(account_id, f"余额已同步稳定: {balance:.2f}")
+                        break
+                else:
+                    stable_count = 0
+                last_balance = balance
+                await asyncio.sleep(10)
+            else:
+                balance = await get_user_balance(page)
+                log(account_id, f"等待 2 分钟余额同步超时，当前余额 {balance:.2f}，继续尝试下注")
+            total_no_popup = 0
+            consecutive_no_popup = 0
+            consecutive_failures = 0
+            total_failures = 0
+            bet_records.clear()
+            continue
 
         if total_failures >= max_total_failures:
             log(account_id, f"累计失败 {total_failures} 次，放弃下注")
@@ -2400,7 +2444,8 @@ async def run_betting_loop(
             consecutive_no_popup += 1
             consecutive_failures += 1
             total_failures += 1
-            log(account_id, f"无弹窗（连续: {consecutive_no_popup}/3，累计: {total_failures}/{max_total_failures}）")
+            total_no_popup += 1
+            log(account_id, f"无弹窗（连续: {consecutive_no_popup}/3，累计无弹窗: {total_no_popup}/10）")
             _update_status(account_id, error=f"无弹窗{consecutive_no_popup}/3")
             await asyncio.sleep(3)
         else:
