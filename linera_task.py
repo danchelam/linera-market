@@ -2359,6 +2359,16 @@ async def run_betting_loop(
             consecutive_failures = 0
             total_failures = 0
             bet_records.clear()
+            # 根据恢复后的余额重新判定下注金额
+            balance = await get_user_balance(page)
+            if balance >= 100:
+                use_small_bet = False
+                log(account_id, f"余额恢复到 {balance:.2f}，使用 $25 下注")
+                await ensure_bet_amount(page, account_id, "25")
+            elif balance >= 2:
+                use_small_bet = True
+                log(account_id, f"余额 {balance:.2f} < 100，使用 $1 下注")
+                await ensure_bet_amount(page, account_id, "1")
             continue
 
         if total_failures >= max_total_failures:
