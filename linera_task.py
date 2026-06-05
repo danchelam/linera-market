@@ -1557,7 +1557,7 @@ async def login(
             spinner_logged = False
             need_outer_retry = False
 
-            for tick in range(180):
+            for tick in range(600):
                 # 钱包弹窗
                 wallet_page = None
                 for p in context.pages:
