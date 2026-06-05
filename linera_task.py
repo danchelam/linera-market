@@ -3179,6 +3179,7 @@ async def claim_weekly_reward(
     await asyncio.sleep(3)
 
     # 处理可能的钱包签名弹窗
+    back_next = weekly_section.locator("span.text-emerald-700:has-text('Back next')")
     for tick in range(30):
         wallet_page = None
         for p in context.pages:
@@ -3221,8 +3222,16 @@ async def claim_weekly_reward(
         pass
 
     claimed_marker = page.locator("text=CLAIMED THIS WEEK")
-    back_next = page.locator("span.text-emerald-700:has-text('Back next')")
-    if await claimed_marker.count() > 0 or await back_next.count() > 0:
+    weekly_text_chk = page.locator("text=Weekly Tier Reward")
+    if await weekly_text_chk.count() > 0:
+        weekly_sec_chk = weekly_text_chk.locator("..").locator("..")
+        back_next_chk = weekly_sec_chk.locator("span.text-emerald-700:has-text('Back next')")
+        claimed_in_weekly = weekly_sec_chk.locator("text=CLAIMED THIS WEEK")
+        if await claimed_in_weekly.count() > 0 or await back_next_chk.count() > 0:
+            log(account_id, "Weekly Reward 领取成功！")
+            _mark_weekly_claimed(account_id)
+            return True
+    elif await claimed_marker.count() > 0:
         log(account_id, "Weekly Reward 领取成功！")
         _mark_weekly_claimed(account_id)
         return True
