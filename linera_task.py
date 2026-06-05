@@ -3097,10 +3097,9 @@ async def claim_weekly_reward(
     假设调用前已在 Portal Quest 页面且已登录。
     """
     if _is_weekly_claimed(account_id):
-        log(account_id, "Weekly Reward 本周已领取，跳过")
-        return True
-
-    log(account_id, "检查 Weekly Reward...")
+        log(account_id, "Weekly Reward 本周已领取（本地记录），验证页面...")
+    else:
+        log(account_id, "检查 Weekly Reward...")
 
     # 确保在 Quest 页面
     try:
@@ -3121,16 +3120,16 @@ async def claim_weekly_reward(
         log(account_id, "未找到 Weekly Tier Reward 区域")
         return False
 
-    # 检查是否已领取（显示 "CLAIMED THIS WEEK" 或 "Back next Tuesday"）
-    claimed_marker = page.locator("text=CLAIMED THIS WEEK")
-    back_next = page.locator("span.text-emerald-700:has-text('Back next')")
-    if await claimed_marker.count() > 0 or await back_next.count() > 0:
+    # 检查是否已领取（限定在 Weekly 区域内检测）
+    weekly_section = weekly_text.locator("..").locator("..")
+    claimed_marker = weekly_section.locator("text=CLAIMED THIS WEEK")
+    back_next_weekly = weekly_section.locator("span.text-emerald-700:has-text('Back next')")
+    if await claimed_marker.count() > 0 or await back_next_weekly.count() > 0:
         log(account_id, "Weekly Reward 已领取过（页面显示 Claimed）")
         _mark_weekly_claimed(account_id)
         return True
 
     # 找到 Weekly 区域的 Claim 按钮
-    weekly_section = weekly_text.locator("..").locator("..")
     weekly_claim_btn = weekly_section.locator("button:has-text('Claim')")
     if await weekly_claim_btn.count() == 0:
         log(account_id, "Weekly Reward 区域未找到 Claim 按钮")
