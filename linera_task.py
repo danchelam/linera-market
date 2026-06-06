@@ -1180,6 +1180,35 @@ async def login(
             # ── Phase B: 检测是否需要 Connect Wallet ──
             connect_btn = page.locator("button:has-text('Connect Wallet')")
             if await connect_btn.count() > 0:
+                # 先处理可能已存在的钱包弹窗（如签名确认）：
+                # 其 "Please confirm signature..." 转圈会被误判为页面加载，必须先点掉
+                for p in list(context.pages):
+                    try:
+                        if _is_wallet_popup(p.url or ""):
+                            log(account_id, f"连接前发现待处理钱包弹窗: {p.url.split('/')[-1]}")
+                            try:
+                                await p.wait_for_load_state("domcontentloaded", timeout=5000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(1)
+                            has_pwd = False
+                            for frame in p.frames:
+                                try:
+                                    if await frame.locator('input[type="password"]').count() > 0:
+                                        has_pwd = True
+                                        break
+                                except Exception:
+                                    continue
+                            if has_pwd:
+                                log(account_id, "弹窗含密码框，执行解锁...")
+                                await _find_and_fill_password(p, context, account_id, OKX_DEFAULT_PASSWORD)
+                                await asyncio.sleep(0.5)
+                                await _click_unlock_button(p, context, account_id)
+                            else:
+                                await _click_wallet_button(p, account_id)
+                            await asyncio.sleep(3)
+                    except Exception:
+                        continue
                 # 先等转圈消失再点，否则会打断正在加载的连接
                 spin_loc = page.locator("svg.animate-spin")
                 if await spin_loc.count() > 0:
@@ -1189,6 +1218,8 @@ async def login(
                     for _sw in range(120):
                         if await spin_loc.count() == 0:
                             break
+                        if _sw > 0 and _sw % 30 == 0:
+                            log(account_id, f"仍在等待页面加载（{_sw}s）...")
                         # 转圈过程中检测钱包弹窗（可能在等解锁/签名）
                         for p in context.pages:
                             try:
