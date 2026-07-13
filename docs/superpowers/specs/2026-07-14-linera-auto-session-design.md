@@ -17,16 +17,16 @@
 1. 调用现有 `check_account_ready`。仅当状态为 `ready` 且 Coins ≥ 2 时继续。
 2. 读取当天 `auto_sessions.json`：已完成则跳过；未完成则复用已保存的目标轮数与历史基线。
 3. 若页面进入时已显示 `AUTO ON`，先点击 `Stop` 并等待开放仓位结算，防止把人工或上次遗留会话混入本次计数。
-4. 保存当前 History 记录集合为基线，并在启动 Auto 前持久化会话状态。
+4. 监听 Linera worker 的 GraphQL 请求，保存启动 Auto 前已查询的 `resolutions.entry(key: N)` 数字键集合和当前 History 摘要为基线，并在启动 Auto 前持久化会话状态。
 5. 点击 `Auto / bet every round`，将 `Higher coins` 和 `Lower coins` 都填为 `1`，点击 `Start Auto · 2 coins / round`。
 6. 同时出现 `AUTO ON`、`Pause`、`Stop` 后进入运行状态；否则判定启动失败。
-7. 每 2 秒读取 History。以市场、周期和轮次时间组成轮次键；同一轮次中新出现 Higher、Lower 两条记录后计为一轮。Live 状态可以计入，但同一键只能计数一次。
+7. 每 2 秒读取 History，并同步收集 Linera worker GraphQL 请求中的 `resolutions.entry(key: N)` 数字键。仅当出现大于启动基线的新 resolution key，且 History 中同时存在本次会话新增的 Higher、Lower 记录时计为一轮；Live 状态可以计入，同一 resolution key 只能计数一次。DOM History 不提供轮次时间或 ID，因此不能单独作为轮次键。
 8. 第 N 个目标轮次的双向记录出现后立即点击 `Stop`，防止下一轮继续下注。
 9. 最多等待 3 分钟，直到最后一轮不再是 Live 且开放仓位为空；随后读取结束 Coins 并标记当天完成。
 
 ## 状态与持久化
 
-会话状态为 `waiting`、`configuring`、`running`、`stopping`、`settling`、`completed`、`failed`。每个账号保存：UTC 日期、目标轮数、已计轮数、开始/结束 Coins、累计 Stake、基线 History 键、已计轮次键、开始/结束时间和失败原因。
+会话状态为 `waiting`、`configuring`、`running`、`stopping`、`settling`、`completed`、`failed`。每个账号保存：UTC 日期、目标轮数、已计轮数、开始/结束 Coins、累计 Stake、基线 resolution keys、已计 resolution keys、History 基线摘要、开始/结束时间和失败原因。
 
 状态写入 `Linera2.0/auto_sessions.json`，采用原子替换，且与 `readiness_status.json` 分离。Web API 在现有账号状态中增加 `session_state`、`target_rounds`、`completed_rounds`、`start_coins`、`current_coins`、`nominal_stake` 和 `net_change`。
 
@@ -37,7 +37,7 @@
 - 启动：按钮文本匹配 `Start Auto`。
 - 运行成功：`AUTO ON`、`Pause`、`Stop` 同时可见。
 - 停止：点击 `Stop` 后 `AUTO ON` 消失，且不再产生新的轮次键。
-- History 计数不得使用请求次数、刷新次数或单条交易数量。
+- History 计数不得使用请求次数、刷新次数或单条交易数量；worker 请求只提取 resolution key，不记录 URL 参数、请求头或响应正文。
 
 ## 异常处理
 
