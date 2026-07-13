@@ -86,7 +86,9 @@ class AutoPageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(state.running)
         page.visible.remove("Pause")
-        self.assertFalse((await self.adapter(page).read_state()).running)
+        partial = await self.adapter(page).read_state()
+        self.assertFalse(partial.running)
+        self.assertTrue(partial.auto_on_visible)
 
     async def test_configure_fills_exactly_one_and_one(self):
         page = FakePage()

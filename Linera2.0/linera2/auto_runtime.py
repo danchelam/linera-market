@@ -87,11 +87,12 @@ async def run_auto_session(
         if inspect_auto:
             try:
                 state = await adapter.read_state()
-                still_running = state.running
+                still_running = state.running or state.auto_on_visible
                 if still_running and not stop_attempted:
                     stop_attempted = True
                     await adapter.stop_once()
-                    still_running = (await adapter.read_state()).running
+                    post_stop = await adapter.read_state()
+                    still_running = post_stop.running or post_stop.auto_on_visible
             except Exception:
                 still_running = True
         record.state = AutoSessionState.FAILED.value
@@ -130,7 +131,7 @@ async def run_auto_session(
             return await persist_failure("未取得后端轮次基线，未启动 Auto")
 
         initial_state = await adapter.read_state()
-        if initial_state.running:
+        if initial_state.running or initial_state.auto_on_visible:
             stop_attempted = True
             if not await adapter.stop_once():
                 return await persist_failure("无法停止遗留 Auto")

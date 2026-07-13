@@ -74,6 +74,7 @@ class FakeAdapter:
         stop_success=True,
         fail_history_after=None,
         on_start=None,
+        partial_active=False,
     ):
         self.histories = list(histories)
         self.last_history = HistoryCounts(0, 0)
@@ -82,12 +83,20 @@ class FakeAdapter:
         self.fail_history_after = fail_history_after
         self.history_reads = 0
         self.on_start = on_start
+        self.partial_active = partial_active
         self.open_calls = 0
         self.configure_calls = 0
         self.start_calls = 0
         self.stop_calls = 0
 
     async def read_state(self):
+        if self.partial_active and self.running:
+            return AutoPageState(
+                running=False,
+                paused=False,
+                stop_visible=True,
+                auto_on_visible=True,
+            )
         return AutoPageState(self.running, self.running, self.running)
 
     async def read_history_counts(self):
@@ -279,6 +288,19 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(record.state, AutoSessionState.FAILED.value)
         self.assertEqual(adapter.stop_calls, 1)
+
+    async def test_partial_auto_on_marker_still_triggers_failure_stop(self):
+        adapter = FakeAdapter(
+            [HistoryCounts(0, 0)],
+            fail_history_after=1,
+            partial_active=True,
+        )
+
+        record = await self.run_with(adapter, FakeMonitor([{1}]))
+
+        self.assertEqual(record.state, AutoSessionState.FAILED.value)
+        self.assertEqual(adapter.stop_calls, 1)
+        self.assertFalse(record.auto_still_running)
 
     async def test_stop_failure_never_claims_completion_or_retries(self):
         adapter = FakeAdapter(

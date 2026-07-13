@@ -26,6 +26,7 @@ class AutoPageState:
     running: bool
     paused: bool
     stop_visible: bool
+    auto_on_visible: bool = False
 
 
 class AutoPage:
@@ -66,6 +67,7 @@ class AutoPage:
             running=auto_on and pause_visible and stop_visible,
             paused=pause_visible,
             stop_visible=stop_visible,
+            auto_on_visible=auto_on,
         )
 
     async def read_history_counts(self) -> HistoryCounts:
