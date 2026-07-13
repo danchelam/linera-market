@@ -1,0 +1,56 @@
+# Linera 2.0 账号就绪与测试网 Auto 会话
+
+默认模式只检查账号是否可以开始任务。程序会读取钱包、Coins、Ride UI 和 Linera worker 响应，不会刷新、连接钱包、确认弹窗或点击业务按钮。
+
+## 运行
+
+由于目录名包含点，请先进入 2.0 目录：
+
+```powershell
+Set-Location .\Linera2.0
+python -m linera2
+```
+
+默认从父目录的 `hubshuju.xlsx` 读取账号，单并发检测，每个账号最多观察 60 秒。
+
+```powershell
+python -m linera2 --workers 3 --timeout 60
+```
+
+启动 Web 状态页：
+
+```powershell
+python -m linera2 --web --workers 3
+```
+
+浏览器访问 `http://127.0.0.1:5060`。结构化状态保存在本目录的 `readiness_status.json`，钱包地址只保存脱敏形式。
+
+## 测试网 Auto 会话
+
+只有显式传入 `--auto-session` 才会点击网站的测试网交易控件。每个账号按 UTC 日期最多完成一次：HIGHER 1 Coin、LOWER 1 Coin，每天首次运行时随机生成并保存 4–7 个完整轮次目标。
+
+```powershell
+# 每日 Auto 会话；首次运行建议单并发并打开状态页
+python -m linera2 --auto-session --workers 1 --web
+
+# 仅供明确授权的单账号人工集成验证
+python -m linera2 --auto-session --integration-target 1 --workers 1
+```
+
+会话状态单独保存在 `auto_sessions.json`。当天已是 `completed` 会直接跳过。若 Web/API 显示 `auto_still_running=true`，表示自动停止未确认成功，需要立即人工检查该浏览器窗口；程序不会通过关闭浏览器来掩盖仍在运行的 Auto。
+
+## 状态说明
+
+- `ready`：钱包、链数据、Coins 和 Ride UI 均正常，且 Coins 大于 0。
+- `wallet_disconnected`：未识别到已连接钱包。
+- `wallet_syncing`：钱包地址存在，但链响应或 Coins 尚未同步。
+- `backend_unavailable`：Linera worker 返回 HTTP 或业务错误。
+- `page_loading`：后端已正常，但 Ride 操作区尚未加载。
+- `insufficient_balance`：同步成功，但 Coins 为 0。
+- `browser_unreachable` / `page_unavailable`：HubStudio CDP 或目标页面不可用。
+
+## 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
