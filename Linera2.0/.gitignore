@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+readiness_status.json
+auto_sessions.json
+screenshots/
