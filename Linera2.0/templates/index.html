@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Linera 2.0 账号状态</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "Microsoft YaHei", sans-serif; }
+    body { margin: 0; background: #0b0d12; color: #e7e9ee; }
+    main { max-width: 1500px; margin: 0 auto; padding: 32px 20px; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    .hint { margin: 0 0 24px; color: #8f98a8; }
+    .panel { overflow-x: auto; border: 1px solid #252a35; border-radius: 12px; background: #12151c; }
+    table { width: 100%; border-collapse: collapse; min-width: 1380px; }
+    th, td { padding: 13px 15px; border-bottom: 1px solid #252a35; text-align: left; }
+    th { color: #9ea7b7; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    td { font-size: 14px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .state { display: inline-block; border-radius: 999px; padding: 4px 9px; font-weight: 700; font-size: 12px; }
+    .ready { color: #84f0ad; background: #113522; }
+    .blocked { color: #ffc59d; background: #3a2418; }
+    .empty { padding: 28px; color: #8f98a8; text-align: center; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Linera 2.0 账号状态</h1>
+    <p class="hint">{% if auto_enabled %}测试网 Auto 会话模式：HIGHER 1 + LOWER 1，每日 4–7 轮。{% else %}只读检测模式：不会刷新页面、连接钱包或点击任务按钮。{% endif %} 页面每 2 秒更新一次。</p>
+    <div class="panel">
+      <table>
+        <thead>
+          <tr><th>账号</th><th>就绪</th><th>Coins</th><th>会话</th><th>目标/完成</th><th>开始/当前/结束</th><th>Stake</th><th>净变化</th><th>Auto 仍运行</th><th>原因</th><th>检测时间</th></tr>
+        </thead>
+        <tbody id="rows"><tr><td class="empty" colspan="11">等待检测结果…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    const yesNo = value => value == null ? "-" : (value ? "是" : "否");
+    const safe = value => String(value ?? "-").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[ch]);
+    async function refresh() {
+      try {
+        const response = await fetch("/api/readiness", {cache: "no-store"});
+        const accounts = await response.json();
+        const rows = document.getElementById("rows");
+        if (!accounts.length) {
+          rows.innerHTML = '<tr><td class="empty" colspan="11">等待检测结果…</td></tr>';
+          return;
+        }
+        rows.innerHTML = accounts.map(item => `
+          <tr>
+            <td>${safe(item.account_id)}</td>
+            <td><span class="state ${item.ready ? "ready" : "blocked"}">${safe(item.state)}</span></td>
+            <td>${safe(item.coins)}</td>
+            <td>${safe(item.session_state)}</td>
+            <td>${safe(item.target_rounds)} / ${safe(item.completed_rounds)}</td>
+            <td>${safe(item.start_coins)} / ${safe(item.current_coins)} / ${safe(item.end_coins)}</td>
+            <td>${safe(item.nominal_stake)}</td>
+            <td>${safe(item.net_change)}</td>
+            <td>${yesNo(item.auto_still_running)}</td>
+            <td>${safe(item.session_failure_reason || item.reason)}</td>
+            <td>${safe(item.checked_at)}</td>
+          </tr>`).join("");
+      } catch (error) {
+        document.getElementById("rows").innerHTML = '<tr><td class="empty" colspan="8">状态接口暂不可用</td></tr>';
+      }
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
