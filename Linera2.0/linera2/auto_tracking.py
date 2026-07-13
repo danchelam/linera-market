@@ -77,6 +77,8 @@ class ResolutionKeyMonitor:
 class HistoryCounts:
     higher: int
     lower: int
+    active_higher: int = 0
+    active_lower: int = 0
 
 
 class RoundTracker:
@@ -92,17 +94,27 @@ class RoundTracker:
         self.counted = {
             key for key in (already_counted or set()) if key > self.baseline_max
         }
+        self.observed = set(self.baseline_keys) | set(self.counted)
+        self.pair_seen = False
+        self.pending_key: int | None = None
 
     def observe(self, keys: set[int], history: HistoryCounts) -> list[int]:
-        higher_delta = max(0, history.higher - self.baseline_history.higher)
-        lower_delta = max(0, history.lower - self.baseline_history.lower)
-        complete_pairs = min(higher_delta, lower_delta)
-        available_slots = max(0, complete_pairs - len(self.counted))
-        candidates = sorted(
+        if history.active_higher > 0 and history.active_lower > 0:
+            self.pair_seen = True
+        unseen = sorted(
             key
             for key in keys
-            if key > self.baseline_max and key not in self.counted
+            if key > self.baseline_max and key not in self.observed
         )
-        added = candidates[:available_slots]
-        self.counted.update(added)
-        return added
+        self.observed.update(unseen)
+        if unseen:
+            self.pending_key = unseen[-1]
+        if not self.pair_seen or self.pending_key is None:
+            return []
+        key = self.pending_key
+        self.pending_key = None
+        self.pair_seen = False
+        if key in self.counted:
+            return []
+        self.counted.add(key)
+        return [key]

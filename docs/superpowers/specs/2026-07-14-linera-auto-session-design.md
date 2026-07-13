@@ -8,7 +8,7 @@
 
 - 每个账号按 UTC 日期每天最多完成一次自动测试会话。
 - 每日目标轮数在 4～7 之间生成一次并持久化；进程重启不得重新随机。
-- 单轮只有同时出现一条 Higher 和一条 Lower 记录才计数，名义 Stake 固定为 2 Coins。
+- 单轮必须在一个 resolution 区间内观察到 Higher、Lower 两条 `Live/Open` 记录，并随后观察到新的 worker resolution key 才计数，名义 Stake 固定为 2 Coins。
 - 总名义测试量为 8～14 Coins，不以输赢或余额下降作为停止条件。
 - 单次会话硬超时为 20 分钟；余额不足 2 Coins、钱包/后端失联或页面异常时提前停止。
 
@@ -16,13 +16,13 @@
 
 1. 调用现有 `check_account_ready`。仅当状态为 `ready` 且 Coins ≥ 2 时继续。
 2. 读取当天 `auto_sessions.json`：已完成则跳过；未完成则复用已保存的目标轮数与历史基线。
-3. 若页面进入时已显示 `AUTO ON`，先点击 `Stop` 并等待开放仓位结算，防止把人工或上次遗留会话混入本次计数。
+3. 若页面进入时已显示 `AUTO ON`，先点击 `Stop`；无论 Auto 是否开启，只要 History 仍有 `Live/Open` 仓位都等待其结算，防止把人工或上次遗留会话混入本次计数。
 4. 监听 Linera worker 的 GraphQL 请求，保存启动 Auto 前已查询的 `resolutions.entry(key: N)` 数字键集合和当前 History 摘要为基线，并在启动 Auto 前持久化会话状态。
 5. 点击 `Auto / bet every round`，将 `Higher coins` 和 `Lower coins` 都填为 `1`，点击 `Start Auto · 2 coins / round`。
 6. 同时出现 `AUTO ON`、`Pause`、`Stop` 后进入运行状态；否则判定启动失败。
-7. 每 2 秒读取 History，并同步收集 Linera worker GraphQL 请求中的 `resolutions.entry(key: N)` 数字键。仅当出现大于启动基线的新 resolution key，且 History 中同时存在本次会话新增的 Higher、Lower 记录时计为一轮；Live 状态可以计入，同一 resolution key 只能计数一次。DOM History 不提供轮次时间或 ID，因此不能单独作为轮次键。
+7. 每 2 秒读取 History，并同步收集 Linera worker GraphQL 请求中的 `resolutions.entry(key: N)` 数字键。History 实际只保留当前仓位，不能使用总行数增量；跟踪器在每个 resolution 区间记录是否看见 Higher、Lower 两条 `Live/Open` 仓位，随后出现大于启动基线的新 resolution key 时计为一轮，同一 key 只能计数一次。若一次观察跨过多个 key，只保守计最近一轮。
 8. 第 N 个目标轮次的双向记录出现后立即点击 `Stop`，防止下一轮继续下注。
-9. 最多等待 3 分钟，直到最后一轮不再是 Live 且开放仓位为空；随后读取结束 Coins 并标记当天完成。
+9. 最多等待 3 分钟，直到 Higher、Lower 都不再是 `Live/Open` 且 History 连续两次稳定；随后读取结束 Coins 并标记当天完成。
 
 ## 状态与持久化
 
@@ -50,7 +50,7 @@
 ## 测试与验收
 
 - 目标轮数只在首次创建会话时随机，重启后保持不变且始终位于 4～7。
-- Higher/Lower 同轮成对后只增加一次；单边记录、重复记录和旧 History 不计数。
+- resolution 区间内出现 Higher/Lower 活跃对并新增 key 后只增加一次；单边记录、重复 key、旧 History 和无活跃对的 key 不计数。
 - 达到目标后只点击一次 Stop，并等待最后一轮结算。
 - 余额不足、就绪失败、启动失败、超时和遗留 Auto 都产生明确状态。
 - 环境 `625421671` 进行单账号集成测试：固定目标 1 轮，确认输入 1+1、启动、出现双向记录、停止及最终 Coins 记录；测试后 Auto 必须为关闭状态。

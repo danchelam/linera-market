@@ -155,7 +155,31 @@ class AutoPageTests(unittest.IsolatedAsyncioTestCase):
 
         counts = await self.adapter(page).read_history_counts()
 
-        self.assertEqual(counts, HistoryCounts(higher=1, lower=1))
+        self.assertEqual(
+            counts,
+            HistoryCounts(
+                higher=1,
+                lower=1,
+                active_higher=1,
+                active_lower=1,
+            ),
+        )
+
+    async def test_history_marks_live_and_open_rows_as_active(self):
+        page = FakePage()
+        page.history_rows = [
+            "BTC 1m HIGHER 1 coins · Live",
+            "BTC 1m LOWER 1 coins · Open",
+            "BTC 1m HIGHER 1 coins · Won",
+            "BTC 1m LOWER 1 coins · Lost",
+        ]
+
+        counts = await self.adapter(page).read_history_counts()
+
+        self.assertEqual(counts.higher, 2)
+        self.assertEqual(counts.lower, 2)
+        self.assertEqual(counts.active_higher, 1)
+        self.assertEqual(counts.active_lower, 1)
 
     async def test_configuration_verification_failure_is_typed(self):
         page = FakePage()

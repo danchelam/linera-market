@@ -77,6 +77,8 @@ class AutoPage:
             raise AutoPageError("无法读取 History") from exc
         higher = 0
         lower = 0
+        active_higher = 0
+        active_lower = 0
         for raw in rows:
             text = " ".join(str(raw).split())
             if not (
@@ -91,7 +93,16 @@ class AutoPage:
                 continue
             higher += int(has_higher)
             lower += int(has_lower)
-        return HistoryCounts(higher=higher, lower=lower)
+            is_active = bool(re.search(r"\b(?:Live|Open)\b", text, re.I))
+            if is_active:
+                active_higher += int(has_higher)
+                active_lower += int(has_lower)
+        return HistoryCounts(
+            higher=higher,
+            lower=lower,
+            active_higher=active_higher,
+            active_lower=active_lower,
+        )
 
     async def open_configuration(self) -> None:
         card = self.page.get_by_text(AUTO_CARD_TEXT).first

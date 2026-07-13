@@ -39,6 +39,15 @@ def ready_result(coins=433, ready=True, state="ready"):
     )
 
 
+def active_history(higher=1, lower=1):
+    return HistoryCounts(
+        higher=higher,
+        lower=lower,
+        active_higher=int(higher > 0),
+        active_lower=int(lower > 0),
+    )
+
+
 class FakePage:
     def __init__(self):
         self.listeners = []
@@ -220,7 +229,7 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_residual_auto_is_stopped_before_new_start(self):
         adapter = FakeAdapter(
             [HistoryCounts(0, 0), HistoryCounts(0, 0), HistoryCounts(0, 0),
-             HistoryCounts(1, 1), HistoryCounts(1, 1), HistoryCounts(1, 1)],
+             active_history(), HistoryCounts(1, 1), HistoryCounts(1, 1)],
             initial_running=True,
         )
         monitor = FakeMonitor([{100}, {100}, {100}, {100, 101}])
@@ -238,7 +247,7 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
             observed.append((current.state, current.baseline_resolution_keys))
 
         adapter = FakeAdapter(
-            [HistoryCounts(2, 2), HistoryCounts(3, 3),
+            [HistoryCounts(2, 2), active_history(3, 3),
              HistoryCounts(3, 3), HistoryCounts(3, 3)],
             on_start=on_start,
         )
@@ -250,7 +259,7 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_correlated_round_stops_and_completes(self):
         adapter = FakeAdapter(
-            [HistoryCounts(4, 4), HistoryCounts(5, 4), HistoryCounts(5, 5),
+            [HistoryCounts(4, 4), active_history(1, 0), active_history(),
              HistoryCounts(5, 5), HistoryCounts(5, 5)]
         )
         monitor = FakeMonitor([{200}, {200, 201}, {200, 201}])
@@ -304,7 +313,7 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_failure_never_claims_completion_or_retries(self):
         adapter = FakeAdapter(
-            [HistoryCounts(0, 0), HistoryCounts(1, 1)], stop_success=False
+            [HistoryCounts(0, 0), active_history()], stop_success=False
         )
         monitor = FakeMonitor([{9}, {9, 10}])
 
@@ -313,6 +322,67 @@ class RunAutoSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.state, AutoSessionState.FAILED.value)
         self.assertTrue(record.auto_still_running)
         self.assertEqual(adapter.stop_calls, 1)
+
+    async def test_existing_live_positions_settle_before_start(self):
+        observed = []
+
+        def on_start():
+            current = self.store.get("acct")
+            observed.append(
+                (adapter.history_reads, current.baseline_resolution_keys)
+            )
+
+        adapter = FakeAdapter(
+            [
+                active_history(),
+                HistoryCounts(1, 1),
+                active_history(),
+                HistoryCounts(1, 1),
+                HistoryCounts(1, 1),
+            ],
+            on_start=on_start,
+        )
+        monitor = FakeMonitor([{10}, {10, 11}, {10, 11, 12}])
+
+        record = await self.run_with(adapter, monitor)
+
+        self.assertEqual(record.state, AutoSessionState.COMPLETED.value)
+        self.assertEqual(observed, [(2, [10, 11])])
+
+    async def test_completion_waits_until_active_positions_clear(self):
+        adapter = FakeAdapter(
+            [
+                HistoryCounts(0, 0),
+                active_history(),
+                active_history(),
+                active_history(),
+                HistoryCounts(1, 1),
+                HistoryCounts(1, 1),
+            ]
+        )
+
+        async def snapshot_after_clear(_page):
+            if adapter.last_history.active_higher or adapter.last_history.active_lower:
+                raise AssertionError("snapshot read before active positions cleared")
+            return SimpleNamespace(coins=430)
+
+        record = await run_auto_session(
+            self.page,
+            object(),
+            "acct",
+            store=self.store,
+            readiness=ready_result(),
+            target_override=1,
+            poll_interval=0,
+            settle_timeout=0.1,
+            adapter_factory=lambda _page: adapter,
+            monitor_factory=lambda: FakeMonitor([{20}, {20, 21}]),
+            sleep_func=no_sleep,
+            snapshot_reader=snapshot_after_clear,
+        )
+
+        self.assertEqual(record.state, AutoSessionState.COMPLETED.value)
+        self.assertEqual(record.end_coins, 430)
 
 
 if __name__ == "__main__":

@@ -75,25 +75,38 @@ class RoundTrackerTests(unittest.TestCase):
             already_counted=set(counted or []),
         )
 
-    def test_baseline_keys_and_rows_never_count(self):
+    def test_baseline_keys_and_active_pair_never_count(self):
         tracker = self.make_tracker()
 
-        added = tracker.observe({100, 101}, HistoryCounts(3, 3))
+        added = tracker.observe(
+            {100, 101},
+            HistoryCounts(1, 1, active_higher=1, active_lower=1),
+        )
 
         self.assertEqual(added, [])
 
-    def test_new_key_with_only_higher_row_does_not_count(self):
+    def test_new_key_without_active_pair_does_not_count(self):
         tracker = self.make_tracker()
 
-        added = tracker.observe({100, 101, 102}, HistoryCounts(4, 3))
+        added = tracker.observe({100, 101, 102}, HistoryCounts(1, 1))
 
         self.assertEqual(added, [])
 
-    def test_new_key_with_higher_and_lower_row_counts_once(self):
+    def test_active_pair_followed_by_new_resolution_counts_once(self):
         tracker = self.make_tracker()
 
-        first = tracker.observe({102}, HistoryCounts(4, 4))
-        second = tracker.observe({102}, HistoryCounts(4, 4))
+        tracker.observe(
+            {100, 101},
+            HistoryCounts(1, 1, active_higher=1, active_lower=1),
+        )
+        first = tracker.observe(
+            {100, 101, 102},
+            HistoryCounts(1, 1, active_higher=1, active_lower=1),
+        )
+        second = tracker.observe(
+            {100, 101, 102},
+            HistoryCounts(1, 1, active_higher=1, active_lower=1),
+        )
 
         self.assertEqual(first, [102])
         self.assertEqual(second, [])
@@ -101,31 +114,40 @@ class RoundTrackerTests(unittest.TestCase):
     def test_duplicate_requests_do_not_double_count(self):
         tracker = self.make_tracker()
 
-        tracker.observe({102}, HistoryCounts(4, 4))
-        added = tracker.observe({102, 102}, HistoryCounts(5, 5))
+        active = HistoryCounts(1, 1, active_higher=1, active_lower=1)
+        tracker.observe({100, 101}, active)
+        tracker.observe({100, 101, 102}, active)
+        added = tracker.observe({100, 101, 102}, active)
 
         self.assertEqual(added, [])
 
-    def test_two_new_keys_require_two_new_pairs(self):
+    def test_two_new_keys_require_active_evidence_in_each_interval(self):
         tracker = self.make_tracker()
+        active = HistoryCounts(1, 1, active_higher=1, active_lower=1)
 
-        first = tracker.observe({102, 103}, HistoryCounts(4, 4))
-        second = tracker.observe({102, 103}, HistoryCounts(5, 5))
+        tracker.observe({100, 101}, active)
+        first = tracker.observe({100, 101, 102}, active)
+        tracker.observe({100, 101, 102}, active)
+        second = tracker.observe({100, 101, 102, 103}, active)
 
         self.assertEqual(first, [102])
         self.assertEqual(second, [103])
 
-    def test_out_of_order_keys_are_counted_in_numeric_order(self):
+    def test_multiple_unseen_keys_count_only_latest_one(self):
         tracker = self.make_tracker()
+        active = HistoryCounts(1, 1, active_higher=1, active_lower=1)
 
-        added = tracker.observe({105, 103, 104}, HistoryCounts(6, 6))
+        tracker.observe({100, 101}, active)
+        added = tracker.observe({100, 101, 105, 103, 104}, active)
 
-        self.assertEqual(added, [103, 104, 105])
+        self.assertEqual(added, [105])
 
-    def test_already_counted_keys_consume_existing_history_pairs(self):
+    def test_already_counted_key_is_never_reused(self):
         tracker = self.make_tracker(counted={102})
+        active = HistoryCounts(1, 1, active_higher=1, active_lower=1)
 
-        added = tracker.observe({102, 103}, HistoryCounts(5, 5))
+        tracker.observe({100, 101, 102}, active)
+        added = tracker.observe({100, 101, 102, 103}, active)
 
         self.assertEqual(added, [103])
 

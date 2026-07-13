@@ -51,6 +51,28 @@ async def _wait_history_stable(
     raise TimeoutError("等待 History 稳定超时")
 
 
+def _has_active_pair(history: HistoryCounts) -> bool:
+    return history.active_higher > 0 or history.active_lower > 0
+
+
+async def _wait_active_positions_clear(
+    adapter: AutoPage,
+    initial: HistoryCounts,
+    *,
+    deadline: float,
+    clock: Callable[[], float],
+    sleep_func: Callable[[float], Awaitable[None]],
+    poll_interval: float,
+) -> HistoryCounts:
+    current = initial
+    while _has_active_pair(current):
+        if clock() >= deadline:
+            raise TimeoutError("等待遗留 Live/Open 仓位结算超时")
+        await sleep_func(poll_interval)
+        current = await adapter.read_history_counts()
+    return current
+
+
 async def run_auto_session(
     page: Page,
     context: BrowserContext,
@@ -147,6 +169,18 @@ async def run_auto_session(
             if not baseline_keys:
                 return await persist_failure("遗留 Auto 停止后轮次基线不可用")
         baseline_history = await adapter.read_history_counts()
+        if _has_active_pair(baseline_history):
+            baseline_history = await _wait_active_positions_clear(
+                adapter,
+                baseline_history,
+                deadline=clock() + max(0.01, settle_timeout),
+                clock=clock,
+                sleep_func=sleep_func,
+                poll_interval=poll_interval,
+            )
+            baseline_keys = monitor.snapshot()
+            if not baseline_keys:
+                return await persist_failure("遗留仓位结算后轮次基线不可用")
         record.state = AutoSessionState.CONFIGURING.value
         record.start_coins = readiness.coins
         record.current_coins = readiness.coins
@@ -209,9 +243,19 @@ async def run_auto_session(
         record.state = AutoSessionState.SETTLING.value
         record.auto_still_running = False
         store.update(record)
+        settle_deadline = clock() + max(0.01, settle_timeout)
+        settling_history = await adapter.read_history_counts()
+        await _wait_active_positions_clear(
+            adapter,
+            settling_history,
+            deadline=settle_deadline,
+            clock=clock,
+            sleep_func=sleep_func,
+            poll_interval=poll_interval,
+        )
         await _wait_history_stable(
             adapter,
-            deadline=clock() + max(0.01, settle_timeout),
+            deadline=settle_deadline,
             clock=clock,
             sleep_func=sleep_func,
             poll_interval=poll_interval,

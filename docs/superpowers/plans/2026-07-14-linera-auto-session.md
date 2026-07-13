@@ -198,6 +198,8 @@ class ResolutionKeyMonitor:
 class HistoryCounts:
     higher: int
     lower: int
+    active_higher: int = 0
+    active_lower: int = 0
 
 class RoundTracker:
     def __init__(
@@ -214,7 +216,7 @@ class RoundTracker:
     ) -> list[int]: ...
 ```
 
-Candidate keys are keys greater than the maximum baseline key and not already counted. Available complete pairs equal `min(history.higher - baseline.higher, history.lower - baseline.lower)`, clamped at zero. `observe` may accept only as many sorted candidate keys as there are unassigned complete pairs. It returns only newly counted keys.
+Candidate keys are keys greater than the maximum baseline key and not already observed. The tracker records whether both HIGHER and LOWER are currently `Live/Open`; a newly observed resolution key can count only when that active-pair evidence exists. Repeated keys never count twice. If several unseen keys arrive together, count only the newest because skipped intervals cannot be reconstructed safely from the two-row current-position History view.
 
 This deliberately does not infer a round from request count or a single History row.
 
@@ -291,7 +293,7 @@ START_TEXT = re.compile(r"Start Auto")
 HISTORY_ROW = "tr.border-t.border-white\\/5"
 ```
 
-For inputs, call `fill("1")` and verify `input_value() == "1"`. For History, normalize whitespace and count only rows containing BTC, `1m`, `1 coins`, and exactly one of HIGHER/LOWER. Accept Live/Open/settled rows because state transitions must not alter the count.
+For inputs, call `fill("1")` and verify `input_value() == "1"`. For History, normalize whitespace and count only rows containing BTC, `1m`, `1 coins`, and exactly one of HIGHER/LOWER. Also expose separate `active_higher`/`active_lower` counts for Live/Open rows; settled rows remain in total counts but do not provide active-pair evidence.
 
 ### Step 3: Add bounded waits
 
@@ -379,12 +381,12 @@ Implement this exact transition order:
 2. Return a failed record without clicking unless readiness is `ready` and Coins ≥ 2.
 3. Load/create the UTC daily record; return immediately if it is already `completed` today.
 4. Attach `ResolutionKeyMonitor` before taking the baseline and allow one 2-second observation window.
-5. If Auto is already running, call `stop_once`, wait until no new History pair appears for two polls, then reset the baseline. A failed residual stop ends the run as `failed`.
+5. If Auto is already running, call `stop_once`. Whether Auto was running or not, wait for all existing Live/Open History positions to clear, then reset the baseline. A failed residual stop or settlement timeout ends the run as `failed`.
 6. Persist `configuring`, baseline keys, baseline row counts, start Coins, and started time before the first configuration click.
 7. Configure 1+1, click Start, verify running markers, then persist `running`.
-8. Poll keys and History. Persist each newly correlated key, increment `completed_rounds`, and set `nominal_stake = completed_rounds * 2`.
+8. Poll keys and History. Record active HIGHER/LOWER evidence per resolution interval; persist each newly correlated key, increment `completed_rounds`, and set `nominal_stake = completed_rounds * 2`.
 9. At target, persist `stopping`, call `stop_once`, then persist `settling`.
-10. For at most 180 seconds, require Auto off and History counts stable for two polls. Re-run the existing frontend snapshot reader to get end Coins, then mark `completed`.
+10. For at most 180 seconds, require Auto off, all Live/Open positions cleared, and History counts stable for two polls. Re-run the existing frontend snapshot reader to get end Coins, then mark `completed`.
 11. On timeout or exception, detect whether Auto is running and call `stop_once` at most once from the failure handler. Persist `failed`, a concise reason, and `auto_still_running` from the post-stop state.
 
 Do not mark completion based on Coins decreasing. Do not retry Start or Stop silently.
