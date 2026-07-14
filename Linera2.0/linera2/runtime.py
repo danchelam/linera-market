@@ -11,6 +11,7 @@ from .auto_session import AutoSessionStore
 from .hubstudio import HubstudioReadOnlyClient
 from .readiness import ReadinessResult, ReadinessState, check_account_ready
 from .store import ReadinessStore
+from .wallet_recovery import ensure_wallet_connected
 
 
 LogFunction = Callable[[str, str], None]
@@ -93,6 +94,16 @@ async def scan_one_account(
         pages[0],
     )
     result = await check_account_ready(page, context, account_id, timeout=timeout)
+    if run_auto and result.state == ReadinessState.WALLET_DISCONNECTED.value:
+        recovery = await ensure_wallet_connected(
+            page,
+            context,
+            account_id,
+            log_func=log_func,
+        )
+        log_func(display_name, f"钱包恢复：{recovery.reason}")
+        result = await check_account_ready(page, context, account_id, timeout=timeout)
+
     store.update(result)
     log_func(
         display_name,
