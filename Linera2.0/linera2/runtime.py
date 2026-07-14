@@ -95,13 +95,16 @@ async def scan_one_account(
     )
     result = await check_account_ready(page, context, account_id, timeout=timeout)
     if run_auto and result.state == ReadinessState.WALLET_DISCONNECTED.value:
-        recovery = await ensure_wallet_connected(
-            page,
-            context,
-            account_id,
-            log_func=log_func,
-        )
-        log_func(display_name, f"钱包恢复：{recovery.reason}")
+        try:
+            recovery = await ensure_wallet_connected(
+                page,
+                context,
+                account_id,
+                log_func=log_func,
+            )
+            log_func(display_name, f"钱包恢复：{recovery.reason}")
+        except Exception as exc:
+            log_func(display_name, f"钱包恢复异常：{type(exc).__name__}")
         result = await check_account_ready(page, context, account_id, timeout=timeout)
 
     store.update(result)

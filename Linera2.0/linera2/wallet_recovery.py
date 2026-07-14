@@ -105,15 +105,6 @@ async def _click_connect(page: Page) -> bool:
     button = locator.first
     if not await button.is_visible():
         return False
-    bounding_box = getattr(button, "bounding_box", None)
-    if callable(bounding_box):
-        box = await bounding_box()
-        if box:
-            await page.mouse.click(
-                float(box["x"]) + float(box["width"]) / 2,
-                float(box["y"]) + float(box["height"]) / 2,
-            )
-            return True
     await button.click(timeout=5_000)
     return True
 
@@ -250,24 +241,53 @@ def _is_okx_notification(page, extension_id: str) -> bool:
     return url.startswith(prefix)
 
 
+async def _has_linera_popup_semantics(page) -> bool:
+    frames = getattr(page, "frames", None)
+    if frames is None:
+        return True
+    for frame in frames:
+        try:
+            text = await frame.locator("body").inner_text(timeout=750)
+            if "app.linera.xyz" in text.lower():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _wait_for_wallet_popup(
     context: BrowserContext,
     observed_pages: list,
     extension_id: str,
     deadline: float,
+    *,
+    excluded_page_ids: set[int] | None = None,
+    require_linera_semantics: bool = False,
 ):
+    excluded = excluded_page_ids or set()
     while _remaining(deadline) > 0:
         candidates = list(reversed(observed_pages)) + list(reversed(context.pages))
         seen: set[int] = set()
         for candidate in candidates:
             marker = id(candidate)
-            if marker in seen:
+            if marker in seen or marker in excluded:
                 continue
             seen.add(marker)
-            if _is_okx_notification(candidate, extension_id):
+            if _is_okx_notification(candidate, extension_id) and (
+                not require_linera_semantics
+                or await _has_linera_popup_semantics(candidate)
+            ):
                 return candidate
         await asyncio.sleep(min(0.2, _remaining(deadline)))
     return None
+
+
+def _notification_page_ids(context: BrowserContext, extension_id: str) -> set[int]:
+    return {
+        id(page)
+        for page in context.pages
+        if _is_okx_notification(page, extension_id)
+    }
 
 
 async def _open_wallet_confirmation(
@@ -284,6 +304,7 @@ async def _open_wallet_confirmation(
             observed_pages,
             extension_id,
             deadline,
+            require_linera_semantics=True,
         )
         if popup is None:
             return None, "Signing 状态未恢复 OKX 确认窗口"
@@ -294,12 +315,14 @@ async def _open_wallet_confirmation(
     center = await _wait_for_okx_tile_center(page, deadline)
     if center is None:
         return None, "Dynamic 弹窗中未找到 OKX Wallet"
+    existing_notifications = _notification_page_ids(context, extension_id)
     await page.mouse.click(*center)
     popup = await _wait_for_wallet_popup(
         context,
         observed_pages,
         extension_id,
         deadline,
+        excluded_page_ids=existing_notifications,
     )
     if popup is None:
         return None, "未检测到 OKX 钱包确认窗口"
@@ -443,12 +466,14 @@ async def ensure_wallet_connected(
         return WalletRecoveryResult(False, f"打开 Connect 弹窗失败：{type(exc).__name__}")
 
     observed_pages: list = []
+    listener_registered = False
 
     def observe_popup(new_page) -> None:
         observed_pages.append(new_page)
 
-    context.on("page", observe_popup)
     try:
+        context.on("page", observe_popup)
+        listener_registered = True
         popup, open_error = await _open_wallet_confirmation(
             page,
             context,
@@ -537,6 +562,10 @@ async def ensure_wallet_connected(
         network_deadline = min(deadline, loop.time() + 5)
         network_center = await _wait_for_network_update_center(page, network_deadline)
         if network_center is not None:
+            existing_notifications = _notification_page_ids(
+                context,
+                helpers.extension_id,
+            )
             observed_pages.clear()
             await page.mouse.click(*network_center)
             network_popup = await _wait_for_wallet_popup(
@@ -544,6 +573,7 @@ async def ensure_wallet_connected(
                 observed_pages,
                 helpers.extension_id,
                 deadline,
+                excluded_page_ids=existing_notifications,
             )
             if network_popup is None:
                 return WalletRecoveryResult(False, "未检测到 OKX 网络更新确认窗口")
@@ -570,7 +600,8 @@ async def ensure_wallet_connected(
     except Exception as exc:
         return WalletRecoveryResult(False, f"钱包连接流程失败：{type(exc).__name__}")
     finally:
-        try:
-            context.remove_listener("page", observe_popup)
-        except Exception:
-            pass
+        if listener_registered:
+            try:
+                context.remove_listener("page", observe_popup)
+            except Exception:
+                pass

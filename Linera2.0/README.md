@@ -31,8 +31,9 @@ python -m linera2 --web --workers 3
 
 若首次就绪检测为 `wallet_disconnected`，`--auto-session` 会先复用父目录的
 OKX 解锁能力，并通过当前 Linera 页面完成一次 Connect/登录确认；随后重新执行
-完整就绪检测。只有第二次结果为 `ready` 才会进入 Auto。恢复流程不会刷新或重启
-浏览器，也不会循环尝试。未传 `--auto-session` 时仍是完全只读检测，不会连接钱包。
+完整就绪检测。只有第二次结果为 `ready` 才会进入 Auto。恢复流程不会重启浏览器
+或循环刷新；父钱包解锁在 provider 尚未注入时可能临时导航到外部页，适配层随后
+返回原 Linera 页面。未传 `--auto-session` 时仍是完全只读检测，不会连接钱包。
 
 ```powershell
 # 每日 Auto 会话；首次运行建议单并发并打开状态页

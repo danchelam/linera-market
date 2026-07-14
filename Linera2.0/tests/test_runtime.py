@@ -270,6 +270,31 @@ class AutoRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.results, [second])
         auto.assert_not_awaited()
 
+    async def test_recovery_exception_still_reruns_and_stores_readiness(self):
+        first = self.disconnected_result()
+        second = self.disconnected_result()
+        second.reason = "final disconnected state"
+        readiness = AsyncMock(side_effect=[first, second])
+        recovery = AsyncMock(side_effect=RuntimeError("CDP closed"))
+        auto = AsyncMock()
+
+        with patch("linera2.runtime.check_account_ready", readiness), \
+             patch("linera2.runtime.ensure_wallet_connected", recovery), \
+             patch("linera2.runtime.run_auto_session", auto):
+            result = await scan_one_account(
+                self.pw,
+                SimpleNamespace(id="acct", ua="acct"),
+                hub=FakeHub(),
+                store=self.store,
+                auto_session_store=object(),
+                run_auto=True,
+            )
+
+        self.assertIs(result, second)
+        self.assertEqual(readiness.await_count, 2)
+        self.assertEqual(self.store.results, [second])
+        auto.assert_not_awaited()
+
     async def test_other_not_ready_state_does_not_trigger_recovery(self):
         syncing = self.disconnected_result()
         syncing.state = ReadinessState.WALLET_SYNCING.value

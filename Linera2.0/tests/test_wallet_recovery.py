@@ -13,9 +13,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from linera2.readiness import FrontendSnapshot  # noqa: E402
 from linera2.wallet_recovery import (  # noqa: E402
     WalletRecoveryResult,
+    _click_connect,
     ensure_wallet_connected,
     _confirm_wallet_steps,
     _wait_for_connect_click,
+    _wait_for_wallet_popup,
 )
 
 
@@ -40,9 +42,12 @@ class FakeLocator:
 class FakeMouse:
     def __init__(self, events):
         self.events = events
+        self.on_click = None
 
     async def click(self, x, y):
         self.events.append(("mouse_clicked", x, y))
+        if self.on_click is not None:
+            self.on_click()
 
 
 class FakePage:
@@ -106,6 +111,22 @@ class FakeContext:
         self.events = events
         self.pages = list(pages or [])
         self.listeners = []
+        self.pending_pages = []
+        for page in self.pages:
+            mouse = getattr(page, "mouse", None)
+            if mouse is not None:
+                mouse.on_click = self._emit_next_page
+
+    def queue_page(self, page):
+        self.pending_pages.append(page)
+
+    def _emit_next_page(self):
+        if not self.pending_pages:
+            return
+        page = self.pending_pages.pop(0)
+        self.pages.append(page)
+        for callback in tuple(self.listeners):
+            callback(page)
 
     def on(self, event, callback):
         assert event == "page"
@@ -116,6 +137,18 @@ class FakeContext:
         assert event == "page"
         if callback in self.listeners:
             self.listeners.remove(callback)
+
+
+class FakeBodyFrame:
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, selector):
+        assert selector == "body"
+        return self
+
+    async def inner_text(self, **_kwargs):
+        return self.text
 
 
 def disconnected_snapshot():
@@ -159,6 +192,59 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         self.assertEqual(click.await_count, 2)
+
+    async def test_connect_uses_locator_actionability_even_when_bounds_exist(self):
+        events = []
+        page = FakePage(events)
+        page.connect.bounding_box = AsyncMock(
+            return_value={"x": 10, "y": 20, "width": 100, "height": 40}
+        )
+
+        result = await _click_connect(page)
+
+        self.assertTrue(result)
+        self.assertIn("connect_clicked", events)
+        self.assertFalse(any(isinstance(event, tuple) for event in events))
+
+    async def test_popup_wait_excludes_notification_present_before_click(self):
+        stale = SimpleNamespace(
+            url="chrome-extension://okx-extension-id/notification.html#/dapp-entry"
+        )
+        fresh = SimpleNamespace(
+            url="chrome-extension://okx-extension-id/notification.html#/dapp-entry"
+        )
+        context = SimpleNamespace(pages=[stale, fresh])
+
+        popup = await _wait_for_wallet_popup(
+            context,
+            [fresh],
+            "okx-extension-id",
+            asyncio.get_running_loop().time() + 1,
+            excluded_page_ids={id(stale)},
+        )
+
+        self.assertIs(popup, fresh)
+
+    async def test_signing_resume_selects_existing_linera_popup_not_other_dapp(self):
+        unrelated = SimpleNamespace(
+            url="chrome-extension://okx-extension-id/notification.html#/dapp-entry",
+            frames=[FakeBodyFrame("Confirm signature for unrelated.example")],
+        )
+        linera = SimpleNamespace(
+            url="chrome-extension://okx-extension-id/notification.html#/dapp-entry",
+            frames=[FakeBodyFrame("Confirm signature for app.linera.xyz")],
+        )
+        context = SimpleNamespace(pages=[linera, unrelated])
+
+        popup = await _wait_for_wallet_popup(
+            context,
+            [],
+            "okx-extension-id",
+            asyncio.get_running_loop().time() + 1,
+            require_linera_semantics=True,
+        )
+
+        self.assertIs(popup, linera)
 
     async def test_wallet_confirmation_waits_for_each_step_to_settle(self):
         popup = SimpleNamespace(
@@ -217,6 +303,22 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("connect_clicked", events)
         helpers.confirm.assert_not_awaited()
 
+    async def test_popup_listener_registration_failure_is_controlled(self):
+        events = []
+        page = FakePage(events)
+        context = FakeContext(events, pages=[page])
+        context.on = Mock(side_effect=RuntimeError("context closed"))
+        helpers = self.helpers()
+
+        with patch(
+            "linera2.wallet_recovery.read_frontend_snapshot",
+            AsyncMock(return_value=disconnected_snapshot()),
+        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+            result = await ensure_wallet_connected(page, context, "acct", timeout=1)
+
+        self.assertFalse(result.recovered)
+        self.assertIn("RuntimeError", result.reason)
+
     async def test_unlock_can_restore_existing_dapp_connection_without_connect(self):
         events = []
         page = FakePage(events, connect_count=0)
@@ -245,7 +347,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             tile={"x": 10, "y": 20, "width": 100, "height": 40},
         )
         page.url = original_url
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers()
 
         async def navigate_while_unlocking(*_args, **_kwargs):
@@ -282,7 +385,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             onboarding_count=1,
             tile={"x": 10, "y": 20, "width": 100, "height": 40},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers()
 
         with patch(
@@ -424,7 +528,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             events,
             tile={"x": 10, "y": 20, "width": 100, "height": 40},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers(unlock="NEED_DAPP")
         snapshot_reader = AsyncMock(
             side_effect=[
@@ -490,7 +595,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             events,
             tile={"x": 0, "y": 0, "width": 20, "height": 20},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers()
 
         with patch(
@@ -517,7 +623,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             events,
             tile={"x": 0, "y": 0, "width": 20, "height": 20},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers(confirm=False)
 
         with patch(
@@ -538,7 +645,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             events,
             tile={"x": 0, "y": 0, "width": 20, "height": 20},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers()
 
         with patch(
@@ -569,7 +677,8 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             events,
             tile={"x": 0, "y": 0, "width": 20, "height": 20},
         )
-        context = FakeContext(events, pages=[page, popup])
+        context = FakeContext(events, pages=[page])
+        context.queue_page(popup)
         helpers = self.helpers()
 
         with patch(
