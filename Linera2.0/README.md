@@ -29,6 +29,11 @@ python -m linera2 --web --workers 3
 
 只有显式传入 `--auto-session` 才会点击网站的测试网交易控件。每个账号按 UTC 日期最多完成一次：HIGHER 1 Coin、LOWER 1 Coin，每天首次运行时随机生成并保存 4–7 个完整轮次目标。
 
+若首次就绪检测为 `wallet_disconnected`，`--auto-session` 会先复用父目录的
+OKX 解锁能力，并通过当前 Linera 页面完成一次 Connect/登录确认；随后重新执行
+完整就绪检测。只有第二次结果为 `ready` 才会进入 Auto。恢复流程不会刷新或重启
+浏览器，也不会循环尝试。未传 `--auto-session` 时仍是完全只读检测，不会连接钱包。
+
 ```powershell
 # 每日 Auto 会话；首次运行建议单并发并打开状态页
 python -m linera2 --auto-session --workers 1 --web
@@ -38,6 +43,10 @@ python -m linera2 --auto-session --integration-target 1 --workers 1
 ```
 
 会话状态单独保存在 `auto_sessions.json`。当天已是 `completed` 会直接跳过。若 Web/API 显示 `auto_still_running=true`，表示自动停止未确认成功，需要立即人工检查该浏览器窗口；程序不会通过关闭浏览器来掩盖仍在运行的 Auto。
+
+排查钱包时可以直接调用 `linera2.wallet_recovery.ensure_wallet_connected()` 做
+钱包专项验证。该接口只负责解锁、Connect 和登录确认，不配置 Auto，也不下注；
+验证完成后应再调用 `check_account_ready()` 确认钱包、后端、Coins 和 Ride UI。
 
 ## 状态说明
 
