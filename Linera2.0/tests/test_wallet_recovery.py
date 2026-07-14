@@ -139,6 +139,23 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("connect_clicked", events)
         helpers.confirm.assert_not_awaited()
 
+    async def test_unlock_can_restore_existing_dapp_connection_without_connect(self):
+        events = []
+        page = FakePage(events, connect_count=0)
+        context = FakeContext(events)
+        helpers = self.helpers(unlock=True)
+
+        with patch(
+            "linera2.wallet_recovery.read_frontend_snapshot",
+            AsyncMock(side_effect=[disconnected_snapshot(), connected_snapshot()]),
+        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+            result = await ensure_wallet_connected(page, context, "acct")
+
+        self.assertTrue(result.recovered)
+        self.assertIn("恢复", result.reason)
+        self.assertNotIn("connect_clicked", events)
+        helpers.confirm.assert_not_awaited()
+
     async def test_need_dapp_unlock_signal_continues_with_trusted_tile_click(self):
         events = []
         popup = SimpleNamespace(
@@ -154,7 +171,11 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         context = FakeContext(events, pages=[page, popup])
         helpers = self.helpers(unlock="NEED_DAPP")
         snapshot_reader = AsyncMock(
-            side_effect=[disconnected_snapshot(), connected_snapshot()]
+            side_effect=[
+                disconnected_snapshot(),
+                disconnected_snapshot(),
+                connected_snapshot(),
+            ]
         )
 
         with patch("linera2.wallet_recovery.read_frontend_snapshot", snapshot_reader), \
@@ -218,7 +239,13 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
-            AsyncMock(side_effect=[disconnected_snapshot(), connected_snapshot()]),
+            AsyncMock(
+                side_effect=[
+                    disconnected_snapshot(),
+                    disconnected_snapshot(),
+                    connected_snapshot(),
+                ]
+            ),
         ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 

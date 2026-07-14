@@ -211,6 +211,12 @@ async def ensure_wallet_connected(
     if unlock_result is not True and unlock_result != "NEED_DAPP":
         return WalletRecoveryResult(False, "OKX 钱包解锁失败")
 
+    try:
+        if _is_connected(await read_frontend_snapshot(page)):
+            return WalletRecoveryResult(True, "钱包解锁后已恢复 Linera 连接")
+    except Exception:
+        pass
+
     _emit(log_func, account_id, "OKX 钱包已解锁，准备连接 Linera")
     try:
         await _close_stale_dynamic_modal(page)
