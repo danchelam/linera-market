@@ -33,20 +33,24 @@ async def _find_and_fill_password(
     account_id: str,
     password: str,
     log_func: LogFunction | None = None,
-) -> bool:
+) -> bool | None:
+    password_present = False
+    probe_failed = False
     for frame in popup.frames:
         try:
             locator = frame.locator('input[type="password"]')
             if await locator.count() > 0:
+                password_present = True
                 await locator.first.fill(password)
                 where = "iframe" if frame != popup.main_frame else "主文档"
                 _emit(log_func, account_id, f"在{where}中找到密码框并填写")
                 return True
         except Exception:
+            probe_failed = True
             continue
 
     try:
-        filled = await popup.evaluate(
+        shadow_result = await popup.evaluate(
             """(password) => {
                 function deep(root, selector) {
                     if (!root) return null;
@@ -65,25 +69,66 @@ async def _find_and_fill_password(
                     return null;
                 }
                 const input = deep(document, 'input[type="password"]');
-                if (!input) return false;
-                input.focus();
-                const setter = Object.getOwnPropertyDescriptor(
-                    HTMLInputElement.prototype,
-                    'value'
-                ).set;
-                setter.call(input, password);
-                input.dispatchEvent(new Event('input', {bubbles: true}));
-                input.dispatchEvent(new Event('change', {bubbles: true}));
-                return true;
+                if (!input) return 'absent';
+                try {
+                    input.focus();
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype,
+                        'value'
+                    ).set;
+                    setter.call(input, password);
+                    input.dispatchEvent(new Event('input', {bubbles: true}));
+                    input.dispatchEvent(new Event('change', {bubbles: true}));
+                    return 'filled';
+                } catch (_) {
+                    return 'failed';
+                }
             }""",
             password,
         )
-        if filled:
+        if shadow_result is True or shadow_result == "filled":
             _emit(log_func, account_id, "JS 递归找到密码框")
             return True
+        if shadow_result == "failed":
+            return False
     except Exception:
-        pass
-    return False
+        return False
+    if password_present or probe_failed:
+        return False
+    return None
+
+
+def _network_request_key(url: str) -> str:
+    return url
+
+
+class _UnlockNetworkMonitor:
+    def __init__(self) -> None:
+        self._pending: list[str] = []
+        self._failed_count = 0
+
+    @property
+    def has_network_problem(self) -> bool:
+        return bool(self._pending or self._failed_count)
+
+    def on_request(self, request) -> None:
+        url = request.url or ""
+        if not url.startswith("chrome-extension://"):
+            self._pending.append(_network_request_key(url))
+
+    def on_response(self, response) -> None:
+        key = _network_request_key(response.url or "")
+        if key in self._pending:
+            self._pending.remove(key)
+
+    def on_request_failed(self, request) -> None:
+        url = request.url or ""
+        if url.startswith("chrome-extension://"):
+            return
+        self._failed_count += 1
+        key = _network_request_key(url)
+        if key in self._pending:
+            self._pending.remove(key)
 
 
 async def _click_unlock_button(
@@ -91,6 +136,19 @@ async def _click_unlock_button(
     account_id: str,
     log_func: LogFunction | None = None,
 ) -> bool:
+    network_monitor = _UnlockNetworkMonitor()
+    on_request = network_monitor.on_request
+    on_response = network_monitor.on_response
+    on_request_failed = network_monitor.on_request_failed
+    listeners_registered = False
+    try:
+        popup.on("request", on_request)
+        popup.on("response", on_response)
+        popup.on("requestfailed", on_request_failed)
+        listeners_registered = True
+    except Exception:
+        pass
+
     clicked = False
     for frame in popup.frames:
         for text in ("解锁", "Unlock"):
@@ -153,41 +211,6 @@ async def _click_unlock_button(
         except Exception:
             pass
 
-    failed_requests: list[str] = []
-    pending_requests: list[str] = []
-
-    def on_request(request) -> None:
-        url = request.url or ""
-        if not url.startswith("chrome-extension://"):
-            pending_requests.append(url[:120])
-
-    def on_response(response) -> None:
-        url = response.url or ""
-        if url in pending_requests:
-            pending_requests.remove(url)
-
-    def on_request_failed(request) -> None:
-        url = request.url or ""
-        if url.startswith("chrome-extension://"):
-            return
-        try:
-            failure = request.failure or ""
-        except Exception:
-            failure = ""
-        failed_requests.append(f"{url[:100]} | {failure}")
-        shortened = url[:120]
-        if shortened in pending_requests:
-            pending_requests.remove(shortened)
-
-    listeners_registered = False
-    try:
-        popup.on("request", on_request)
-        popup.on("response", on_response)
-        popup.on("requestfailed", on_request_failed)
-        listeners_registered = True
-    except Exception:
-        pass
-
     try:
         for _ in range(15):
             await asyncio.sleep(1)
@@ -203,7 +226,7 @@ async def _click_unlock_button(
                 _emit(log_func, account_id, "解锁成功（URL 已变化）")
                 return True
 
-        if failed_requests or pending_requests:
+        if network_monitor.has_network_problem:
             _emit(log_func, account_id, "解锁网络请求超时，停止本次解锁")
         else:
             _emit(log_func, account_id, "解锁超时（扩展内部未完成）")
@@ -334,7 +357,7 @@ async def _unlock_with_provider_popup(
         if extension_id in url:
             wallet_popup = new_page
             popup_ready.set()
-            _emit(log_func, account_id, f"捕获到钱包弹窗: {url[-60:]}")
+            _emit(log_func, account_id, "捕获到钱包弹窗")
 
     context.on("page", capture_popup)
     try:
@@ -359,7 +382,7 @@ async def _unlock_with_provider_popup(
                 }"""
             )
         except Exception as exc:
-            _emit(log_func, account_id, f"触发弹窗异常: {exc}")
+            _emit(log_func, account_id, f"触发弹窗异常: {type(exc).__name__}")
 
         try:
             await asyncio.wait_for(popup_ready.wait(), timeout=15)
@@ -417,8 +440,7 @@ async def _unlock_with_provider_popup(
             _emit(
                 log_func,
                 account_id,
-                f"弹窗渲染 #{check + 1}: password={password_count}, "
-                f"button={button_count}, frames={len(popup.frames)}",
+                "等待钱包弹窗渲染",
             )
             if password_count > 0 or button_count > 0:
                 break
@@ -426,7 +448,13 @@ async def _unlock_with_provider_popup(
                 _emit(log_func, account_id, "弹窗渲染超时（20秒）")
                 return False
 
-        if not await _find_and_fill_password(popup, account_id, password, log_func):
+        password_result = await _find_and_fill_password(
+            popup,
+            account_id,
+            password,
+            log_func,
+        )
+        if password_result is None:
             _emit(log_func, account_id, "无密码框 → 钱包已解锁（关闭签名弹窗）")
             try:
                 if not popup.is_closed():
@@ -434,6 +462,9 @@ async def _unlock_with_provider_popup(
             except Exception:
                 pass
             return True
+        if password_result is False:
+            _emit(log_func, account_id, "检测到密码框但填写失败")
+            return False
 
         await asyncio.sleep(0.5)
         if not await _click_unlock_button(popup, account_id, log_func):
