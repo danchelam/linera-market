@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -66,7 +67,26 @@ def manifest_for(files, remove=()) -> UpdateManifest:
     )
 
 
+class ReadFailureResponse:
+    def __init__(self, error):
+        self.error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _error_type, _error, _traceback):
+        return False
+
+    def read(self):
+        raise self.error
+
+
 class ManifestParsingTests(unittest.TestCase):
+    def test_update_result_defaults_removals_completed_for_legacy_callers(self):
+        result = UpdateResult(False, False, "up to date")
+
+        self.assertIs(result.removals_completed, True)
+
     def test_parse_manifest_returns_immutable_schema_v2_model(self):
         result = parse_manifest(manifest_json())
 
@@ -511,6 +531,7 @@ class ApplyManifestTests(unittest.TestCase):
             result = apply_manifest(manifest, self.root, lambda _path: b"runtime")
 
         self.assertTrue(result.updated)
+        self.assertTrue(result.removals_completed)
         self.assertFalse(legacy.exists())
         for protected in (other_legacy, state, account, log, screenshot):
             self.assertTrue(protected.exists())
@@ -650,6 +671,22 @@ class ApplyManifestTests(unittest.TestCase):
             result.reason,
             "updated; legacy removal skipped/private config unavailable",
         )
+
+    def test_runner_change_with_unavailable_migration_marks_removals_incomplete(self):
+        self.write_live("linera_runner.py", b"old-runner")
+        legacy = self.write_live("linera_task.py", b"legacy-task")
+        manifest = manifest_for(
+            (("linera_runner.py", b"new-runner"),),
+            remove=("linera_task.py",),
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new-runner")
+
+        self.assertTrue(result.updated)
+        self.assertTrue(result.restart_required)
+        self.assertIs(result.removals_completed, False)
+        self.assertTrue(legacy.exists())
 
     def test_private_config_is_migrated_before_base_module_removal(self):
         self.write_live("Linera2.0/linera2/runtime.py", b"old")
@@ -800,6 +837,46 @@ class RunnerBridgeTests(unittest.TestCase):
             r"version\.json\?t=\d+$",
         )
 
+    def test_incomplete_raw_response_falls_back_to_jsdelivr(self):
+        primary = (
+            "https://raw.githubusercontent.com/danchelam/linera-market/"
+            "refs/heads/main"
+        )
+        incomplete = ReadFailureResponse(
+            http.client.IncompleteRead(b"partial-secret-response")
+        )
+        with patch(
+            "linera_runner.urllib.request.urlopen",
+            side_effect=[incomplete, io.BytesIO(manifest_json().encode())],
+        ) as open_url:
+            result = fetch_remote_manifest(primary)
+
+        self.assertEqual(result.schema_version, 2)
+        self.assertIn("cdn.jsdelivr.net", open_url.call_args_list[1].args[0])
+
+    def test_incomplete_responses_launch_installed_version_without_leaking(self):
+        (self.root / "Linera2.0/linera2").mkdir(parents=True)
+        responses = [
+            ReadFailureResponse(
+                http.client.IncompleteRead(b"authorization-secret-one")
+            ),
+            ReadFailureResponse(
+                http.client.HTTPException("credential-secret-two")
+            ),
+        ]
+        output = io.StringIO()
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.urllib.request.urlopen", side_effect=responses
+        ), patch(
+            "linera_runner.launch_linera2", return_value=0
+        ) as launch, redirect_stderr(output):
+            self.assertEqual(main([]), 0)
+
+        launch.assert_called_once_with(self.root, [])
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertNotIn("authorization-secret-one", output.getvalue())
+        self.assertNotIn("credential-secret-two", output.getvalue())
+
     def test_run_update_downloads_manifest_files_from_release_base(self):
         payload = b"new-runtime"
         manifest = manifest_for((("Linera2.0/linera2/runtime.py", payload),))
@@ -871,6 +948,30 @@ class RunnerBridgeTests(unittest.TestCase):
 
         restart.assert_called_once_with(["--web"])
         launch.assert_not_called()
+
+    def test_runner_update_with_incomplete_removals_does_not_restart(self):
+        (self.root / "Linera2.0/linera2").mkdir(parents=True)
+        output = io.StringIO()
+        result = UpdateResult(
+            True,
+            True,
+            "dynamic-secret-reason",
+            removals_completed=False,
+        )
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.run_update", return_value=result
+        ), patch("linera_runner._restart_self") as restart, patch(
+            "linera_runner.launch_linera2", return_value=0
+        ) as launch, redirect_stderr(output):
+            self.assertEqual(main(["--web"]), 0)
+
+        restart.assert_not_called()
+        launch.assert_called_once_with(self.root, ["--web"])
+        self.assertEqual(
+            output.getvalue().strip(),
+            "【更新】旧文件移除未完成，当前进程继续启动已安装版本。",
+        )
+        self.assertNotIn("dynamic-secret-reason", output.getvalue())
 
     def test_launch_inserts_package_root_and_calls_cli(self):
         fake_cli = types.ModuleType("linera2.cli")

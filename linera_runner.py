@@ -8,6 +8,7 @@ top of these primitives.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -65,6 +66,7 @@ class UpdateResult:
     updated: bool
     restart_required: bool
     reason: str
+    removals_completed: bool = True
 
 
 def validate_relative_path(value: str) -> str:
@@ -436,6 +438,7 @@ def _apply_manifest_transaction(
                 updated=True,
                 restart_required=restart_required,
                 reason="updated; legacy removal skipped/private config unavailable",
+                removals_completed=False,
             )
         try:
             removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
@@ -590,7 +593,7 @@ def _fetch_remote_bytes(
         try:
             with urllib.request.urlopen(url, timeout=timeout) as response:
                 return response.read()
-        except OSError:
+        except (OSError, http.client.HTTPException):
             continue
     raise OSError("remote update unavailable")
 
@@ -649,9 +652,14 @@ def main(argv: list[str] | None = None) -> int:
             print("【更新】远程清单不可用，继续启动已安装版本。", file=sys.stderr)
             return launch_linera2(install_root, forwarded)
         return 1
-    if result.restart_required:
+    if result.restart_required and result.removals_completed:
         _restart_self(forwarded)
         return 0
+    if result.restart_required:
+        print(
+            "【更新】旧文件移除未完成，当前进程继续启动已安装版本。",
+            file=sys.stderr,
+        )
     installed = (install_root / "Linera2.0" / "linera2").is_dir()
     if not installed:
         return 1
