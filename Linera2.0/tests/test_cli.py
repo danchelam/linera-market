@@ -1,12 +1,15 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from linera2 import cli  # noqa: E402
 from linera2.cli import build_parser, default_account_file  # noqa: E402
 
 
@@ -14,6 +17,14 @@ class CliTests(unittest.TestCase):
     def test_default_account_file_is_parent_hubshuju(self):
         expected = PROJECT_ROOT.parent / "hubshuju.xlsx"
         self.assertEqual(default_account_file(), expected)
+
+    def test_default_account_file_prefers_project_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir)
+            local = project_dir / "hubshuju.xlsx"
+            local.touch()
+            with patch.object(cli, "PROJECT_DIR", project_dir):
+                self.assertEqual(default_account_file(), local)
 
     def test_default_arguments_run_one_cli_scan(self):
         args = build_parser().parse_args([])

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 import threading
 from pathlib import Path
 
+from . import account_support
 from .auto_session import AutoSessionStore
 from .runtime import scan_accounts
 from .store import ReadinessStore
@@ -13,7 +13,6 @@ from .webapp import create_app
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-PARENT_DIR = PROJECT_DIR.parent
 STATUS_FILE = PROJECT_DIR / "readiness_status.json"
 AUTO_STATUS_FILE = PROJECT_DIR / "auto_sessions.json"
 
@@ -27,7 +26,8 @@ class LineraArgumentParser(argparse.ArgumentParser):
 
 
 def default_account_file() -> Path:
-    return PARENT_DIR / "hubshuju.xlsx"
+    local = PROJECT_DIR / "hubshuju.xlsx"
+    return local if local.exists() else PROJECT_DIR.parent / "hubshuju.xlsx"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,23 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_parent_base_module():
-    parent = str(PARENT_DIR)
-    if parent not in sys.path:
-        sys.path.insert(0, parent)
-    import base_module
-
-    return base_module
-
-
-def load_accounts(path: Path):
-    base_module = _load_parent_base_module()
-    return base_module.load_accounts(str(path))
-
-
-def _parent_log(account_id: str, message: str) -> None:
-    base_module = _load_parent_base_module()
-    base_module.log(account_id, message)
+load_accounts = account_support.load_accounts
 
 
 async def run_scan(
@@ -85,7 +69,7 @@ async def run_scan(
         accounts,
         max_workers=max(1, args.workers),
         store=store,
-        log_func=_parent_log,
+        log_func=account_support.log,
         timeout=max(1, args.timeout),
         auto_session_store=auto_store if args.auto_session else None,
         run_auto=args.auto_session,
