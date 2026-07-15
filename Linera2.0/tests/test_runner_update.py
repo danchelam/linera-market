@@ -231,6 +231,23 @@ class ApplyManifestTests(unittest.TestCase):
 
         self.assertFalse(result.updated)
         self.assertFalse(result.restart_required)
+        self.assertTrue(result.removals_completed)
+        self.assertEqual(live.read_bytes(), b"old")
+
+    def test_pending_removals_staging_failure_marks_incomplete(self):
+        live = self.write_live("Linera2.0/linera2/runtime.py", b"old")
+        manifest = UpdateManifest(
+            2,
+            "v",
+            "v",
+            (ManifestFile("Linera2.0/linera2/runtime.py", "f" * 64),),
+            ("linera_task.py",),
+        )
+
+        result = apply_manifest(manifest, self.root, lambda _path: b"corrupt")
+
+        self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertEqual(live.read_bytes(), b"old")
 
     def test_staging_failure_removes_transaction_created_install_root(self):
@@ -257,12 +274,13 @@ class ApplyManifestTests(unittest.TestCase):
             "v",
             "v",
             (ManifestFile("../outside-runner-test.py", digest(b"escaped")),),
-            (),
+            ("linera_task.py",),
         )
 
         result = apply_manifest(manifest, self.root, lambda _path: b"escaped")
 
         self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertFalse(outside.exists())
 
     def test_direct_manifest_model_rejects_float_schema_version(self):
@@ -340,6 +358,28 @@ class ApplyManifestTests(unittest.TestCase):
             result = apply_manifest(manifest, self.root, payloads.__getitem__)
 
         self.assertFalse(result.updated)
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b"old-a", b"old-b"))
+
+    def test_pending_removals_replacement_failure_marks_incomplete(self):
+        a = self.write_live("Linera2.0/linera2/a.py", b"old-a")
+        b = self.write_live("Linera2.0/linera2/b.py", b"old-b")
+        payloads = {
+            "Linera2.0/linera2/a.py": b"new-a",
+            "Linera2.0/linera2/b.py": b"new-b",
+        }
+        manifest = manifest_for(
+            tuple(payloads.items()),
+            remove=("linera_task.py",),
+        )
+
+        with patch(
+            "linera_runner.os.replace",
+            side_effect=[None, OSError("locked"), None],
+        ):
+            result = apply_manifest(manifest, self.root, payloads.__getitem__)
+
+        self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertEqual((a.read_bytes(), b.read_bytes()), (b"old-a", b"old-b"))
 
     def test_replace_failure_removes_new_files_created_earlier(self):
@@ -442,7 +482,10 @@ class ApplyManifestTests(unittest.TestCase):
             "Linera2.0/linera2/a.py": b"new-a",
             "Linera2.0/linera2/b.py": b"new-b",
         }
-        manifest = manifest_for(tuple(payloads.items()))
+        manifest = manifest_for(
+            tuple(payloads.items()),
+            remove=("linera_task.py",),
+        )
         real_replace = os.replace
 
         def fail_backup_restore(source, destination):
@@ -454,6 +497,7 @@ class ApplyManifestTests(unittest.TestCase):
             result = apply_manifest(manifest, self.root, payloads.__getitem__)
 
         self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertEqual(result.reason, "unsafe update target and rollback failed")
 
     def test_backup_failure_reports_when_prior_file_rollback_fails(self):
@@ -547,6 +591,7 @@ class ApplyManifestTests(unittest.TestCase):
         result = apply_manifest(manifest, self.root, lambda _path: self.fail("fetch"))
 
         self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertTrue(legacy.exists())
 
     def test_removal_failure_restores_updates_and_prior_removals(self):
@@ -563,6 +608,7 @@ class ApplyManifestTests(unittest.TestCase):
             result = apply_manifest(manifest, self.root, lambda _path: b"new")
 
         self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertEqual(runtime.read_bytes(), b"old")
         self.assertEqual(first_legacy.read_bytes(), b"legacy")
         self.assertTrue(blocked.is_dir())
@@ -588,6 +634,7 @@ class ApplyManifestTests(unittest.TestCase):
             result = apply_manifest(manifest, self.root, lambda _path: b"new")
 
         self.assertFalse(result.updated)
+        self.assertFalse(result.removals_completed)
         self.assertEqual(result.reason, "removal and rollback failed")
 
     def test_removal_backup_directory_failure_restores_prior_removal_and_update(self):

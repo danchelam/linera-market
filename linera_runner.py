@@ -414,18 +414,27 @@ def _apply_manifest_transaction(
     install_root: Path,
     fetch_file: Callable[[str], bytes],
 ) -> UpdateResult:
+    pending_removals = bool(manifest.remove)
     install_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
         temporary_root = Path(temp_name)
         try:
             staged = _stage_and_verify(changed, temporary_root, fetch_file)
         except (ManifestError, OSError, TypeError):
-            return UpdateResult(False, False, "staging verification failed")
+            return UpdateResult(
+                False,
+                False,
+                "staging verification failed",
+                removals_completed=not pending_removals,
+            )
         result, replaced_files, created_directories = _replace_with_rollback(
             staged, install_root, temporary_root
         )
         if not result.updated:
-            return result
+            return replace(
+                result,
+                removals_completed=not pending_removals,
+            )
         restart_required = any(item.path == "linera_runner.py" for item in changed)
         private_config_ready = True
         if manifest.remove:
@@ -454,8 +463,17 @@ def _apply_manifest_transaction(
                 if restored and removal_rollback_ok
                 else "removal and rollback failed"
             )
-            return UpdateResult(False, False, reason)
-    return replace(result, restart_required=restart_required)
+            return UpdateResult(
+                False,
+                False,
+                reason,
+                removals_completed=False,
+            )
+    return replace(
+        result,
+        restart_required=restart_required,
+        removals_completed=True,
+    )
 
 
 def apply_manifest(
@@ -466,12 +484,26 @@ def apply_manifest(
     """Apply a verified manifest transaction without touching private state."""
     install_root = Path(install_root)
     try:
+        pending_removals = bool(manifest.remove)
+    except (AttributeError, TypeError):
+        pending_removals = False
+    try:
         _validate_manifest_for_apply(manifest)
         changed = _changed_entries(manifest.files, install_root)
     except (ManifestError, AttributeError, TypeError):
-        return UpdateResult(False, False, "invalid manifest")
+        return UpdateResult(
+            False,
+            False,
+            "invalid manifest",
+            removals_completed=not pending_removals,
+        )
     if not changed:
-        return UpdateResult(False, False, "up to date")
+        return UpdateResult(
+            False,
+            False,
+            "up to date",
+            removals_completed=not pending_removals,
+        )
 
     install_root_created = not install_root.exists()
     try:
@@ -479,7 +511,12 @@ def apply_manifest(
             manifest, changed, install_root, fetch_file
         )
     except OSError:
-        result = UpdateResult(False, False, "staging verification failed")
+        result = UpdateResult(
+            False,
+            False,
+            "staging verification failed",
+            removals_completed=not pending_removals,
+        )
 
     if install_root_created and not result.updated and install_root.exists():
         try:
