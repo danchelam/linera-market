@@ -1,0 +1,5 @@
+flask>=3.0,<4
+openpyxl>=3.1,<4
+pandas>=2.2,<3
+playwright>=1.50,<2
+requests>=2.32,<3

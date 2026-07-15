@@ -12,7 +12,10 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
+import time
+import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -541,3 +544,121 @@ def migrate_private_config(install_root: Path) -> bool:
     if not match:
         return False
     return _atomic_write_private_config(config_path, match.group(1))
+
+
+DEFAULT_UPDATE_BASE_URL = (
+    "https://raw.githubusercontent.com/danchelam/linera-market/refs/heads/main"
+)
+_RAW_URL_PATTERN = re.compile(
+    r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/"
+    r"refs/heads/([^/]+)(/.*)?$"
+)
+
+
+def _install_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _remote_base_urls(base_url: str) -> tuple[str, ...]:
+    primary = base_url.rstrip("/")
+    match = _RAW_URL_PATTERN.fullmatch(primary)
+    if not match:
+        return (primary,)
+    owner, repository, branch, suffix = match.groups()
+    fallback = (
+        f"https://cdn.jsdelivr.net/gh/{owner}/{repository}@{branch}"
+        f"{suffix or ''}"
+    )
+    return primary, fallback
+
+
+def _cache_busted(url: str) -> str:
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}t={time.time_ns()}"
+
+
+def _fetch_remote_bytes(
+    base_url: str,
+    relative_path: str,
+    *,
+    timeout: int,
+) -> bytes:
+    for candidate in _remote_base_urls(base_url):
+        url = _cache_busted(f"{candidate}/{relative_path.lstrip('/')}")
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return response.read()
+        except OSError:
+            continue
+    raise OSError("remote update unavailable")
+
+
+def fetch_remote_manifest(base_url: str) -> UpdateManifest:
+    payload = _fetch_remote_bytes(
+        base_url,
+        "version.json",
+        timeout=10,
+    )
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeError as error:
+        raise ManifestError("invalid manifest encoding") from error
+    return parse_manifest(text)
+
+
+def run_update(install_root: Path, base_url: str) -> UpdateResult:
+    manifest = fetch_remote_manifest(base_url)
+
+    def fetch_file(relative_path: str) -> bytes:
+        return _fetch_remote_bytes(
+            base_url,
+            relative_path,
+            timeout=30,
+        )
+
+    return apply_manifest(manifest, Path(install_root), fetch_file)
+
+
+def launch_linera2(install_root: Path, argv: list[str]) -> int:
+    package_root = Path(install_root) / "Linera2.0"
+    sys.path.insert(0, str(package_root))
+    from linera2.cli import main as cli_main
+
+    return int(cli_main(argv))
+
+
+def _restart_self(argv: list[str]) -> None:
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).resolve()
+        os.execv(str(executable), [str(executable), *argv])
+    else:
+        executable = Path(sys.executable).resolve()
+        script = Path(__file__).resolve()
+        os.execv(str(executable), [str(executable), str(script), *argv])
+
+
+def main(argv: list[str] | None = None) -> int:
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    install_root = _install_root()
+    try:
+        result = run_update(install_root, DEFAULT_UPDATE_BASE_URL)
+    except (ManifestError, OSError):
+        if (install_root / "Linera2.0" / "linera2").is_dir():
+            print("【更新】远程清单不可用，继续启动已安装版本。", file=sys.stderr)
+            return launch_linera2(install_root, forwarded)
+        return 1
+    if result.restart_required:
+        _restart_self(forwarded)
+        return 0
+    installed = (install_root / "Linera2.0" / "linera2").is_dir()
+    if not installed:
+        return 1
+    if not result.updated and result.reason != "up to date":
+        print("【更新】更新未完成，继续启动已安装版本。", file=sys.stderr)
+    return launch_linera2(install_root, forwarded)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

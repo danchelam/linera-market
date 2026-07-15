@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -21,9 +23,14 @@ from linera_runner import (  # noqa: E402
     ManifestError,
     ManifestFile,
     UpdateManifest,
+    UpdateResult,
     apply_manifest,
+    fetch_remote_manifest,
+    launch_linera2,
+    main,
     migrate_private_config,
     parse_manifest,
+    run_update,
     sha256_file,
 )
 
@@ -145,6 +152,17 @@ class ManifestParsingTests(unittest.TestCase):
         self.assertEqual(result.base_version, "legacy-base")
         defaulted = parse_manifest(manifest_json())
         self.assertEqual((defaulted.task_version, defaulted.base_version), ("", ""))
+
+    def test_legacy_compatibility_fields_are_accepted(self):
+        result = parse_manifest(
+            manifest_json(
+                runner_version="2026.07.15.1",
+                task_version="",
+                base_version="",
+            )
+        )
+
+        self.assertEqual(result.runner_version, "2026.07.15.1")
 
     def test_parse_manifest_still_requires_app_version(self):
         data = json.loads(manifest_json())
@@ -754,6 +772,146 @@ class PrivateConfigMigrationTests(unittest.TestCase):
             )
             self.assertFalse(migrate_private_config(self.root))
         self.assertFalse((self.root / "Linera2.0/local_config.json").exists())
+
+
+class RunnerBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+
+    def test_fetch_manifest_falls_back_to_jsdelivr_with_cache_busters(self):
+        primary = (
+            "https://raw.githubusercontent.com/danchelam/linera-market/"
+            "refs/heads/main"
+        )
+        with patch(
+            "linera_runner.urllib.request.urlopen",
+            side_effect=[OSError("raw unavailable"), io.BytesIO(manifest_json().encode())],
+        ) as open_url:
+            result = fetch_remote_manifest(primary)
+
+        self.assertEqual(result.schema_version, 2)
+        urls = [item.args[0] for item in open_url.call_args_list]
+        self.assertRegex(urls[0], rf"^{re.escape(primary)}/version\.json\?t=\d+$")
+        self.assertRegex(
+            urls[1],
+            r"^https://cdn\.jsdelivr\.net/gh/danchelam/linera-market@main/"
+            r"version\.json\?t=\d+$",
+        )
+
+    def test_run_update_downloads_manifest_files_from_release_base(self):
+        payload = b"new-runtime"
+        manifest = manifest_for((("Linera2.0/linera2/runtime.py", payload),))
+
+        with patch("linera_runner.fetch_remote_manifest", return_value=manifest), patch(
+            "linera_runner.urllib.request.urlopen", return_value=io.BytesIO(payload)
+        ) as open_url:
+            result = run_update(self.root, "https://updates.example/release")
+
+        self.assertTrue(result.updated)
+        self.assertEqual(
+            (self.root / "Linera2.0/linera2/runtime.py").read_bytes(), payload
+        )
+        self.assertRegex(
+            open_url.call_args.args[0],
+            r"^https://updates\.example/release/Linera2\.0/linera2/runtime\.py\?t=\d+$",
+        )
+
+    def test_manifest_unavailable_launches_installed_version(self):
+        (self.root / "Linera2.0/linera2").mkdir(parents=True)
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.fetch_remote_manifest", side_effect=OSError("offline")
+        ), patch("linera_runner.launch_linera2", return_value=0) as launch:
+            self.assertEqual(main([]), 0)
+
+        launch.assert_called_once_with(self.root, [])
+
+    def test_manifest_failure_warning_does_not_include_exception_text(self):
+        (self.root / "Linera2.0/linera2").mkdir(parents=True)
+        output = io.StringIO()
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.fetch_remote_manifest",
+            side_effect=OSError("authorization-secret-marker"),
+        ), patch("linera_runner.launch_linera2", return_value=0), redirect_stderr(
+            output
+        ):
+            self.assertEqual(main([]), 0)
+
+        self.assertNotIn("authorization-secret-marker", output.getvalue())
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+    def test_failed_update_launches_installed_version(self):
+        (self.root / "Linera2.0/linera2").mkdir(parents=True)
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.run_update",
+            return_value=UpdateResult(False, False, "staging verification failed"),
+        ), patch("linera_runner.launch_linera2", return_value=7) as launch:
+            self.assertEqual(main(["--web"]), 7)
+
+        launch.assert_called_once_with(self.root, ["--web"])
+
+    def test_failed_first_install_returns_error_without_launching(self):
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.run_update",
+            return_value=UpdateResult(False, False, "staging verification failed"),
+        ), patch("linera_runner.launch_linera2") as launch:
+            self.assertEqual(main([]), 1)
+
+        launch.assert_not_called()
+
+    def test_successful_runner_update_restarts_without_launching_old_process(self):
+        with patch("linera_runner._install_root", return_value=self.root), patch(
+            "linera_runner.run_update",
+            return_value=UpdateResult(True, True, "updated"),
+        ), patch("linera_runner._restart_self") as restart, patch(
+            "linera_runner.launch_linera2"
+        ) as launch:
+            self.assertEqual(main(["--web"]), 0)
+
+        restart.assert_called_once_with(["--web"])
+        launch.assert_not_called()
+
+    def test_launch_inserts_package_root_and_calls_cli(self):
+        fake_cli = types.ModuleType("linera2.cli")
+        fake_cli.argv = None
+
+        def cli_main(argv):
+            fake_cli.argv = argv
+            return 0
+
+        fake_cli.main = cli_main
+        fake_package = types.ModuleType("linera2")
+        fake_package.__path__ = []
+        package_root = str(self.root / "Linera2.0")
+        original_path = list(sys.path)
+        self.addCleanup(lambda: setattr(sys, "path", original_path))
+
+        with patch.dict(
+            sys.modules,
+            {"linera2": fake_package, "linera2.cli": fake_cli},
+        ):
+            result = launch_linera2(self.root, ["--web", "--workers", "1"])
+
+        self.assertEqual(sys.path[0], package_root)
+        self.assertEqual(fake_cli.argv, ["--web", "--workers", "1"])
+        self.assertEqual(result, 0)
+
+    def test_runtime_requirements_are_bounded_and_portable(self):
+        requirements = (REPO_ROOT / "Linera2.0/requirements.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            requirements.splitlines(),
+            [
+                "flask>=3.0,<4",
+                "openpyxl>=3.1,<4",
+                "pandas>=2.2,<3",
+                "playwright>=1.50,<2",
+                "requests>=2.32,<3",
+            ],
+        )
 
 
 if __name__ == "__main__":
