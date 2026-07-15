@@ -302,8 +302,14 @@ def _mkdir_parents_tracked(
     while cursor != install_root and not cursor.exists():
         missing.append(cursor)
         cursor = cursor.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    created_directories.extend(reversed(missing))
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+        else:
+            created_directories.append(directory)
 
 
 def _replace_with_rollback(
@@ -343,8 +349,8 @@ def _replace_with_rollback(
                 )
                 return UpdateResult(False, False, reason), [], []
             backup = temporary_root / "backups" / entry.path
-            backup.parent.mkdir(parents=True, exist_ok=True)
             try:
+                backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(live, backup)
             except OSError:
                 restored = _restore_replaced(replaced, created_directories)
@@ -387,14 +393,63 @@ def _remove_exact_legacy_paths(
         if not target.exists():
             continue
         backup = temporary_root / "removal_backups" / relative
-        backup.parent.mkdir(parents=True, exist_ok=True)
         try:
+            backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target, backup)
             target.unlink()
         except OSError:
             return False, restore_removed()
         removed.append((target, backup))
     return True, True
+
+
+def _apply_manifest_transaction(
+    manifest: UpdateManifest,
+    changed: tuple[ManifestFile, ...],
+    install_root: Path,
+    fetch_file: Callable[[str], bytes],
+) -> UpdateResult:
+    install_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
+        temporary_root = Path(temp_name)
+        try:
+            staged = _stage_and_verify(changed, temporary_root, fetch_file)
+        except (ManifestError, OSError, TypeError):
+            return UpdateResult(False, False, "staging verification failed")
+        result, replaced_files, created_directories = _replace_with_rollback(
+            staged, install_root, temporary_root
+        )
+        if not result.updated:
+            return result
+        restart_required = any(item.path == "linera_runner.py" for item in changed)
+        private_config_ready = True
+        if manifest.remove:
+            try:
+                private_config_ready = migrate_private_config(install_root)
+            except (OSError, UnicodeError):
+                private_config_ready = False
+        if not private_config_ready:
+            return UpdateResult(
+                updated=True,
+                restart_required=restart_required,
+                reason="updated; legacy removal skipped/private config unavailable",
+            )
+        try:
+            removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
+                manifest.remove, install_root, temporary_root
+            )
+        except (ManifestError, AttributeError, TypeError, OSError):
+            removals_ok = False
+            removal_rollback_ok = False
+        if not removals_ok:
+            restored = _restore_replaced(replaced_files, created_directories)
+            reason = (
+                "removal failed"
+                if restored and removal_rollback_ok
+                else "removal and rollback failed"
+            )
+            return UpdateResult(False, False, reason)
+    return replace(result, restart_required=restart_required)
 
 
 def apply_manifest(
@@ -414,61 +469,21 @@ def apply_manifest(
 
     install_root_created = not install_root.exists()
     try:
-        install_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
-            temporary_root = Path(temp_name)
-            try:
-                staged = _stage_and_verify(changed, temporary_root, fetch_file)
-            except (ManifestError, OSError, TypeError):
-                return UpdateResult(False, False, "staging verification failed")
-            result, replaced_files, created_directories = _replace_with_rollback(
-                staged, install_root, temporary_root
-            )
-            if not result.updated:
-                return result
-            restart_required = any(
-                item.path == "linera_runner.py" for item in changed
-            )
-            private_config_ready = True
-            if manifest.remove:
-                try:
-                    private_config_ready = migrate_private_config(install_root)
-                except (OSError, UnicodeError):
-                    private_config_ready = False
-            if not private_config_ready:
-                return UpdateResult(
-                    updated=True,
-                    restart_required=restart_required,
-                    reason=(
-                        "updated; legacy removal skipped/private config unavailable"
-                    ),
-                )
-            try:
-                removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
-                    manifest.remove, install_root, temporary_root
-                )
-            except (ManifestError, AttributeError, TypeError):
-                removals_ok = False
-                removal_rollback_ok = False
-            if not removals_ok:
-                restored = _restore_replaced(replaced_files, created_directories)
-                reason = (
-                    "removal failed"
-                    if restored and removal_rollback_ok
-                    else "removal and rollback failed"
-                )
-                return UpdateResult(False, False, reason)
-    finally:
-        if install_root_created:
-            try:
-                install_root.rmdir()
-            except OSError:
-                pass
+        result = _apply_manifest_transaction(
+            manifest, changed, install_root, fetch_file
+        )
+    except OSError:
+        result = UpdateResult(False, False, "staging verification failed")
 
-    return replace(
-        result,
-        restart_required=restart_required,
-    )
+    if install_root_created and not result.updated and install_root.exists():
+        try:
+            install_root.rmdir()
+        except OSError:
+            result = replace(
+                result,
+                reason=f"{result.reason}; install root rollback failed",
+            )
+    return result
 
 
 def _read_local_password(config_path: Path) -> str | None:

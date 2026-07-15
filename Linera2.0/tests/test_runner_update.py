@@ -348,6 +348,55 @@ class ApplyManifestTests(unittest.TestCase):
         self.assertFalse(result.updated)
         self.assertFalse(install_root.exists())
 
+    def test_partial_parent_creation_failure_rolls_back_created_directories(self):
+        target_parent = self.root / "Linera2.0/templates/nested"
+        manifest = manifest_for(
+            (("Linera2.0/templates/nested/index.html", b"new"),)
+        )
+        real_mkdir = Path.mkdir
+
+        def fail_after_partial_creation(path, *args, **kwargs):
+            if path == target_parent:
+                real_mkdir(path.parent, parents=True, exist_ok=True)
+                raise OSError("directory creation failed")
+            return real_mkdir(path, *args, **kwargs)
+
+        with patch(
+            "pathlib.Path.mkdir", autospec=True, side_effect=fail_after_partial_creation
+        ):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertFalse(result.updated)
+        self.assertFalse((self.root / "Linera2.0").exists())
+
+    def test_replacement_backup_directory_failure_rolls_back_prior_file(self):
+        first = self.write_live("Linera2.0/linera2/a.py", b"old-a")
+        second = self.write_live("Linera2.0/linera2/b.py", b"old-b")
+        payloads = {
+            "Linera2.0/linera2/a.py": b"new-a",
+            "Linera2.0/linera2/b.py": b"new-b",
+        }
+        manifest = manifest_for(tuple(payloads.items()))
+        real_mkdir = Path.mkdir
+        backup_calls = 0
+
+        def fail_second_backup_directory(path, *args, **kwargs):
+            nonlocal backup_calls
+            if "backups" in path.parts and path.name == "linera2":
+                backup_calls += 1
+                if backup_calls == 2:
+                    raise OSError("backup directory failed")
+            return real_mkdir(path, *args, **kwargs)
+
+        with patch(
+            "pathlib.Path.mkdir", autospec=True, side_effect=fail_second_backup_directory
+        ):
+            result = apply_manifest(manifest, self.root, payloads.__getitem__)
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "backup failed")
+        self.assertEqual((first.read_bytes(), second.read_bytes()), (b"old-a", b"old-b"))
+
     def test_unsafe_target_reports_when_prior_file_rollback_fails(self):
         self.write_live("Linera2.0/linera2/a.py", b"old-a")
         (self.root / "Linera2.0/linera2/b.py").mkdir()
@@ -501,6 +550,67 @@ class ApplyManifestTests(unittest.TestCase):
 
         self.assertFalse(result.updated)
         self.assertEqual(result.reason, "removal and rollback failed")
+
+    def test_removal_backup_directory_failure_restores_prior_removal_and_update(self):
+        runtime = self.write_live("Linera2.0/linera2/runtime.py", b"old")
+        first = self.write_live("linera_task.py", b"legacy-task")
+        second = self.write_live("base_module.py", b"legacy-base")
+        manifest = manifest_for(
+            (("Linera2.0/linera2/runtime.py", b"new"),),
+            remove=("linera_task.py", "base_module.py"),
+        )
+        real_mkdir = Path.mkdir
+        removal_backup_calls = 0
+
+        def fail_second_removal_backup_directory(path, *args, **kwargs):
+            nonlocal removal_backup_calls
+            if "removal_backups" in path.parts:
+                removal_backup_calls += 1
+                if removal_backup_calls == 2:
+                    raise OSError("removal backup directory failed")
+            return real_mkdir(path, *args, **kwargs)
+
+        with patch.dict(os.environ, {"OKX_WALLET_PASSWORD": "configured"}), patch(
+            "pathlib.Path.mkdir",
+            autospec=True,
+            side_effect=fail_second_removal_backup_directory,
+        ):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "removal failed")
+        self.assertEqual(runtime.read_bytes(), b"old")
+        self.assertEqual(first.read_bytes(), b"legacy-task")
+        self.assertEqual(second.read_bytes(), b"legacy-base")
+
+    def test_install_root_cleanup_failure_reports_rollback_failure(self):
+        install_root = self.root / "new-install"
+        manifest = UpdateManifest(
+            2,
+            "v",
+            "v",
+            (ManifestFile("Linera2.0/linera2/runtime.py", "f" * 64),),
+            (),
+        )
+        real_rmdir = Path.rmdir
+
+        def fail_install_root_cleanup(path):
+            if path == install_root:
+                raise OSError("cleanup denied")
+            return real_rmdir(path)
+
+        with patch(
+            "pathlib.Path.rmdir", autospec=True, side_effect=fail_install_root_cleanup
+        ):
+            result = apply_manifest(
+                manifest, install_root, lambda _path: b"corrupt"
+            )
+
+        self.assertFalse(result.updated)
+        self.assertEqual(
+            result.reason,
+            "staging verification failed; install root rollback failed",
+        )
 
     def test_private_config_unavailable_skips_all_legacy_removals(self):
         runtime = self.write_live("Linera2.0/linera2/runtime.py", b"old")
