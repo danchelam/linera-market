@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
 from playwright.async_api import BrowserContext, Page
 
 from .readiness import read_frontend_snapshot
+from .wallet_support import OKX_EXTENSION_ID, click_wallet_button, unlock_okx_wallet
 
 
 LogFunction = Callable[[str, str], None]
@@ -32,20 +31,10 @@ class AutoSignResult:
     reason: str
 
 
-def _load_parent_wallet_helpers() -> SimpleNamespace:
-    parent_root = Path(__file__).resolve().parents[2]
-    if str(parent_root) not in sys.path:
-        sys.path.insert(0, str(parent_root))
-
-    from base_module import (  # pylint: disable=import-outside-toplevel
-        OKX_EXTENSION_ID,
-        _click_wallet_button,
-        unlock_okx_wallet,
-    )
-
+def _load_wallet_helpers() -> SimpleNamespace:
     return SimpleNamespace(
         unlock=unlock_okx_wallet,
-        confirm=_click_wallet_button,
+        confirm=click_wallet_button,
         extension_id=OKX_EXTENSION_ID,
     )
 
@@ -521,6 +510,7 @@ async def _confirm_wallet_steps(
     deadline: float,
     *,
     max_steps: int = 8,
+    log_func: LogFunction | None = None,
 ) -> bool:
     any_clicked = False
     stagnant_retry_available = True
@@ -528,8 +518,17 @@ async def _confirm_wallet_steps(
         if _popup_is_closed(popup):
             return any_clicked
         before = await _popup_state_marker(popup)
+        if log_func is None:
+            confirmation = confirm_func(popup, account_id, max_rounds=1)
+        else:
+            confirmation = confirm_func(
+                popup,
+                account_id,
+                max_rounds=1,
+                log_func=log_func,
+            )
         clicked = await asyncio.wait_for(
-            confirm_func(popup, account_id, max_rounds=1),
+            confirmation,
             timeout=max(0.1, _remaining(deadline)),
         )
         if not clicked:
@@ -665,7 +664,7 @@ async def ensure_auto_sign_enabled(
         )
 
     try:
-        helpers = _load_parent_wallet_helpers()
+        helpers = _load_wallet_helpers()
     except Exception as exc:
         return await _finish_auto_sign(
             page,
@@ -679,7 +678,7 @@ async def ensure_auto_sign_enabled(
         original_url = None
     try:
         unlock_result = await asyncio.wait_for(
-            helpers.unlock(context, account_id),
+            helpers.unlock(context, account_id, log_func=log_func),
             timeout=max(0.1, _remaining(deadline)),
         )
     except asyncio.TimeoutError:
@@ -768,6 +767,7 @@ async def ensure_auto_sign_enabled(
                     popup,
                     account_id,
                     deadline,
+                    log_func=log_func,
                 ),
                 timeout=max(0.1, _remaining(deadline)),
             )
@@ -833,9 +833,9 @@ async def ensure_wallet_connected(
         return WalletRecoveryResult(False, f"读取钱包状态失败：{type(exc).__name__}")
 
     try:
-        helpers = _load_parent_wallet_helpers()
+        helpers = _load_wallet_helpers()
         unlock_result = await asyncio.wait_for(
-            helpers.unlock(context, account_id),
+            helpers.unlock(context, account_id, log_func=log_func),
             timeout=max(0.1, _remaining(deadline)),
         )
     except asyncio.TimeoutError:
@@ -919,7 +919,13 @@ async def ensure_wallet_connected(
         )
         try:
             confirmed = await asyncio.wait_for(
-                _confirm_wallet_steps(helpers.confirm, popup, account_id, deadline),
+                _confirm_wallet_steps(
+                    helpers.confirm,
+                    popup,
+                    account_id,
+                    deadline,
+                    log_func=log_func,
+                ),
                 timeout=max(0.1, _remaining(deadline)),
             )
         except asyncio.TimeoutError:
@@ -949,7 +955,7 @@ async def ensure_wallet_connected(
                 pass
             try:
                 retry_unlock = await asyncio.wait_for(
-                    helpers.unlock(context, account_id),
+                    helpers.unlock(context, account_id, log_func=log_func),
                     timeout=max(0.1, _remaining(deadline)),
                 )
             except asyncio.TimeoutError:
@@ -978,7 +984,13 @@ async def ensure_wallet_connected(
                 if popup is None:
                     return WalletRecoveryResult(False, f"二次解锁后：{retry_error}")
                 confirmed = await asyncio.wait_for(
-                    _confirm_wallet_steps(helpers.confirm, popup, account_id, deadline),
+                    _confirm_wallet_steps(
+                        helpers.confirm,
+                        popup,
+                        account_id,
+                        deadline,
+                        log_func=log_func,
+                    ),
                     timeout=max(0.1, _remaining(deadline)),
                 )
             except asyncio.TimeoutError:
@@ -1017,6 +1029,7 @@ async def ensure_wallet_connected(
                         network_popup,
                         account_id,
                         deadline,
+                        log_func=log_func,
                     ),
                     timeout=max(0.1, _remaining(deadline)),
                 )
@@ -1070,6 +1083,7 @@ async def ensure_wallet_connected(
                         signing_popup,
                         account_id,
                         signing_deadline,
+                        log_func=log_func,
                     ),
                     timeout=max(0.1, _remaining(signing_deadline)),
                 )

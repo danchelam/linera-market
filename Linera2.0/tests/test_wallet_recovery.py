@@ -264,6 +264,12 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             extension_id="okx-extension-id",
         )
 
+    def test_wallet_recovery_does_not_import_parent_base_module(self):
+        from linera2 import wallet_recovery
+
+        source = Path(wallet_recovery.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("from base_module import", source)
+
     async def test_result_is_frozen_value_object(self):
         result = WalletRecoveryResult(True, "connected")
 
@@ -284,7 +290,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         context = FakeContext(events)
         loader = Mock()
 
-        with patch("linera2.wallet_recovery._load_parent_wallet_helpers", loader):
+        with patch("linera2.wallet_recovery._load_wallet_helpers", loader):
             result = await ensure_auto_sign_enabled(page, context, "acct", timeout=1)
 
         self.assertTrue(result.enabled)
@@ -302,7 +308,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         helpers = self.helpers()
 
         with patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._wait_for_wallet_popup",
@@ -319,7 +325,13 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.enabled)
         self.assertIn("已开启", result.reason)
         self.assertIn("auto_sign_clicked", events)
-        confirm.assert_awaited_once_with(helpers.confirm, popup, "acct", unittest.mock.ANY)
+        confirm.assert_awaited_once_with(
+            helpers.confirm,
+            popup,
+            "acct",
+            unittest.mock.ANY,
+            log_func=None,
+        )
 
     async def test_auto_sign_missing_wallet_popup_is_controlled_failure(self):
         events = []
@@ -327,7 +339,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         context = FakeContext(events)
 
         with patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=self.helpers(),
         ), patch(
             "linera2.wallet_recovery._wait_for_wallet_popup",
@@ -348,7 +360,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         helpers = self.helpers(unlock=False)
 
         with patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ):
             result = await ensure_auto_sign_enabled(page, context, "acct", timeout=1)
@@ -580,6 +592,28 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         confirm.assert_any_await(popup, "acct", max_rounds=1)
         self.assertEqual(wait_change.await_count, 1)
 
+    async def test_wallet_confirmation_passes_log_func_to_local_helper(self):
+        popup = SimpleNamespace(is_closed=lambda: False, frames=None)
+        confirm = AsyncMock(return_value=True)
+        logger = Mock()
+
+        self.assertTrue(
+            await _confirm_wallet_steps(
+                confirm,
+                popup,
+                "acct",
+                asyncio.get_running_loop().time() + 1,
+                max_steps=1,
+                log_func=logger,
+            )
+        )
+        confirm.assert_awaited_once_with(
+            popup,
+            "acct",
+            max_rounds=1,
+            log_func=logger,
+        )
+
     async def test_wallet_confirmation_retries_one_unchanged_enabled_step(self):
         state = {"closed": False, "clicks": 0}
         popup = SimpleNamespace(is_closed=lambda: state["closed"])
@@ -648,7 +682,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=connected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", loader):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", loader):
             result = await ensure_wallet_connected(page, context, "acct")
 
         self.assertTrue(result.recovered)
@@ -664,7 +698,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct")
 
         self.assertFalse(result.recovered)
@@ -682,7 +716,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertFalse(result.recovered)
@@ -697,7 +731,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(side_effect=[disconnected_snapshot(), connected_snapshot()]),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct")
 
         self.assertTrue(result.recovered)
@@ -734,7 +768,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     connected_snapshot(),
                 ]
             ),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertTrue(result.recovered)
@@ -767,7 +801,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     connected_snapshot(),
                 ]
             ),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertTrue(result.recovered)
@@ -794,7 +828,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     connected_snapshot(),
                 ]
             ),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertTrue(result.recovered)
@@ -820,7 +854,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers), \
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers), \
              patch(
                  "linera2.wallet_recovery._wait_for_wallet_popup",
                  AsyncMock(side_effect=[first_popup, network_popup]),
@@ -862,7 +896,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._click_pending_signing",
@@ -916,7 +950,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._click_pending_signing",
@@ -992,7 +1026,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._click_pending_signing",
@@ -1049,7 +1083,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._click_pending_signing",
@@ -1095,7 +1129,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers), \
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers), \
              patch(
                  "linera2.wallet_recovery._wait_for_wallet_popup",
                  AsyncMock(side_effect=[blank_unlock, connected_popup]),
@@ -1138,7 +1172,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("linera2.wallet_recovery.read_frontend_snapshot", snapshot_reader), \
-             patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+             patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertTrue(result.recovered)
@@ -1159,7 +1193,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertFalse(result.recovered)
@@ -1184,7 +1218,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._open_wallet_confirmation",
@@ -1214,7 +1248,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers), \
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers), \
              patch("linera2.wallet_recovery._wait_for_okx_tile_center", AsyncMock(return_value=None)):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
@@ -1277,7 +1311,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     connected_snapshot(),
                 ]
             ),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertTrue(result.recovered)
@@ -1299,7 +1333,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers):
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
         self.assertFalse(result.recovered)
@@ -1326,7 +1360,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
         ), patch(
-            "linera2.wallet_recovery._load_parent_wallet_helpers",
+            "linera2.wallet_recovery._load_wallet_helpers",
             return_value=helpers,
         ), patch(
             "linera2.wallet_recovery._open_wallet_confirmation",
@@ -1364,7 +1398,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     connected_snapshot(),
                 ]
             ),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers), \
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers), \
              patch(
                  "linera2.wallet_recovery._confirm_wallet_steps",
                  AsyncMock(return_value=False),
@@ -1390,7 +1424,7 @@ class WalletRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "linera2.wallet_recovery.read_frontend_snapshot",
             AsyncMock(return_value=disconnected_snapshot()),
-        ), patch("linera2.wallet_recovery._load_parent_wallet_helpers", return_value=helpers), \
+        ), patch("linera2.wallet_recovery._load_wallet_helpers", return_value=helpers), \
              patch("linera2.wallet_recovery._wait_for_connected_snapshot", AsyncMock(return_value=False)):
             result = await ensure_wallet_connected(page, context, "acct", timeout=1)
 
