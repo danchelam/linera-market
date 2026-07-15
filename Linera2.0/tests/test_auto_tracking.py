@@ -22,6 +22,17 @@ class FakeRequest:
         self.post_data = post_data
 
 
+class FakeResponse:
+    def __init__(self, url, request, payload, status=200):
+        self.url = url
+        self.request = request
+        self.payload = payload
+        self.status = status
+
+    async def json(self):
+        return self.payload
+
+
 class ResolutionKeyParserTests(unittest.TestCase):
     def test_extracts_numeric_entry_keys_from_resolutions_query(self):
         query = (
@@ -67,6 +78,40 @@ class ResolutionKeyParserTests(unittest.TestCase):
         self.assertEqual(monitor.snapshot(), {7})
 
 
+class ResolutionResponseMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_monitor_counts_only_non_null_resolution_values(self):
+        monitor = ResolutionKeyMonitor()
+        request = FakeRequest(
+            "https://worker.infra.linera.net/chains/x/applications/y",
+            json.dumps(
+                {
+                    "query": (
+                        "query { resolutions { "
+                        "g7: entry(key: 7) { value } "
+                        "g8: entry(key: 8) { value } } }"
+                    )
+                }
+            ),
+        )
+        response = FakeResponse(
+            request.url,
+            request,
+            {
+                "data": {
+                    "resolutions": {
+                        "g7": {"value": {"resolution": "resolved"}},
+                        "g8": {"value": None},
+                    }
+                }
+            },
+        )
+
+        monitor.on_response(response)
+        await monitor.drain()
+
+        self.assertEqual(monitor.snapshot(), {7})
+
+
 class RoundTrackerTests(unittest.TestCase):
     def make_tracker(self, counted=None):
         return RoundTracker(
@@ -91,6 +136,18 @@ class RoundTrackerTests(unittest.TestCase):
         added = tracker.observe({100, 101, 102}, HistoryCounts(1, 1))
 
         self.assertEqual(added, [])
+
+    def test_resolution_seen_before_active_pair_is_never_reused(self):
+        tracker = self.make_tracker()
+        active = HistoryCounts(1, 1, active_higher=1, active_lower=1)
+
+        before_pair = tracker.observe({100, 101, 102}, HistoryCounts(1, 1))
+        pair_appears = tracker.observe({100, 101, 102}, active)
+        after_pair = tracker.observe({100, 101, 102, 103}, active)
+
+        self.assertEqual(before_pair, [])
+        self.assertEqual(pair_appears, [])
+        self.assertEqual(after_pair, [103])
 
     def test_active_pair_followed_by_new_resolution_counts_once(self):
         tracker = self.make_tracker()

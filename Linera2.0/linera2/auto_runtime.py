@@ -15,6 +15,7 @@ from .readiness import (
     check_account_ready,
     read_frontend_snapshot,
 )
+from .wallet_recovery import ensure_auto_sign_enabled
 
 
 LogFunction = Callable[[str, str], None]
@@ -49,6 +50,47 @@ async def _wait_history_stable(
         previous = current
         await sleep_func(poll_interval)
     raise TimeoutError("等待 History 稳定超时")
+
+
+async def _wait_coin_balance_stable(
+    page: Page,
+    snapshot_reader,
+    *,
+    deadline: float,
+    clock: Callable[[], float],
+    sleep_func: Callable[[float], Awaitable[None]],
+    poll_interval: float,
+    stable_samples: int = 3,
+    minimum_balance_exclusive: int | None = None,
+):
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise TimeoutError("等待 Coins 稳定超时")
+    await sleep_func(min(5.0, remaining))
+
+    previous: int | None = None
+    consecutive = 0
+    while clock() < deadline:
+        snapshot = await snapshot_reader(page)
+        coins = snapshot.coins
+        if coins is None:
+            previous = None
+            consecutive = 0
+        elif (
+            minimum_balance_exclusive is not None
+            and coins <= minimum_balance_exclusive
+        ):
+            previous = None
+            consecutive = 0
+        elif coins == previous:
+            consecutive += 1
+        else:
+            previous = coins
+            consecutive = 1
+        if consecutive >= max(2, stable_samples):
+            return snapshot
+        await sleep_func(max(2.0, poll_interval))
+    raise TimeoutError("等待 Coins 稳定超时")
 
 
 def _has_active_pair(history: HistoryCounts) -> bool:
@@ -90,6 +132,7 @@ async def run_auto_session(
     sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
     snapshot_reader=read_frontend_snapshot,
     readiness_checker=check_account_ready,
+    auto_sign_ensurer=ensure_auto_sign_enabled,
     clock: Callable[[], float] = monotonic,
 ) -> AutoSessionRecord:
     account_id = str(account_id)
@@ -98,6 +141,14 @@ async def run_auto_session(
     monitor: ResolutionKeyMonitor | None = None
     listener_attached = False
     stop_attempted = False
+    final_round_locked_coins: int | None = None
+    final_round_reference_coins: int | None = None
+
+    async def monitor_snapshot() -> set[int]:
+        if monitor is None:
+            return set()
+        await monitor.drain()
+        return monitor.snapshot()
 
     async def persist_failure(reason: str, *, inspect_auto: bool = True) -> AutoSessionRecord:
         nonlocal record, stop_attempted
@@ -110,11 +161,18 @@ async def run_auto_session(
             try:
                 state = await adapter.read_state()
                 still_running = state.running or state.auto_on_visible
-                if still_running and not stop_attempted:
+                for _ in range(2):
+                    if not still_running:
+                        break
                     stop_attempted = True
                     await adapter.stop_once()
                     post_stop = await adapter.read_state()
-                    still_running = post_stop.running or post_stop.auto_on_visible
+                    still_running = (
+                        post_stop.running
+                        or post_stop.paused
+                        or post_stop.stop_visible
+                        or post_stop.auto_on_visible
+                    )
             except Exception:
                 still_running = True
         record.state = AutoSessionState.FAILED.value
@@ -141,14 +199,16 @@ async def run_auto_session(
         if readiness.coins is None or readiness.coins < 2:
             return await persist_failure("Coins 少于 2，不能启动 Auto", inspect_auto=False)
 
+        await adapter.ensure_target_market()
+
         monitor = monitor_factory()
-        page.on("request", monitor.on_request)
+        page.on("response", monitor.on_response)
         listener_attached = True
         baseline_keys: set[int] = set()
         baseline_deadline = clock() + max(2, min(10, poll_interval * 5))
         while clock() < baseline_deadline and not baseline_keys:
             await sleep_func(poll_interval)
-            baseline_keys = monitor.snapshot()
+            baseline_keys = await monitor_snapshot()
         if not baseline_keys:
             return await persist_failure("未取得后端轮次基线，未启动 Auto")
 
@@ -165,7 +225,7 @@ async def run_auto_session(
                 poll_interval=poll_interval,
             )
             stop_attempted = False
-            baseline_keys = monitor.snapshot()
+            baseline_keys = await monitor_snapshot()
             if not baseline_keys:
                 return await persist_failure("遗留 Auto 停止后轮次基线不可用")
         baseline_history = await adapter.read_history_counts()
@@ -178,12 +238,13 @@ async def run_auto_session(
                 sleep_func=sleep_func,
                 poll_interval=poll_interval,
             )
-            baseline_keys = monitor.snapshot()
+            baseline_keys = await monitor_snapshot()
             if not baseline_keys:
                 return await persist_failure("遗留仓位结算后轮次基线不可用")
         record.state = AutoSessionState.CONFIGURING.value
         record.start_coins = readiness.coins
         record.current_coins = readiness.coins
+        final_round_reference_coins = readiness.coins
         record.end_coins = None
         record.baseline_resolution_keys = sorted(baseline_keys)
         record.baseline_higher_rows = baseline_history.higher
@@ -194,9 +255,37 @@ async def run_auto_session(
         record.auto_still_running = False
         store.update(record)
 
+        auto_sign = await auto_sign_ensurer(
+            page,
+            context,
+            account_id,
+            log_func=log_func,
+        )
+        if not auto_sign.enabled:
+            return await persist_failure(
+                f"Auto-sign 未就绪：{auto_sign.reason}",
+                inspect_auto=False,
+            )
+        log_func(account_id, auto_sign.reason)
+
+        # Auto-sign can take long enough for the hydrated app to restore a
+        # previous duration. Reassert the exact route after wallet work.
+        await adapter.ensure_target_market()
+
         await adapter.open_configuration()
         await adapter.configure_one_plus_one()
-        await adapter.start()
+        await adapter.validate_target_market()
+
+        async def capture_pre_click_baseline() -> None:
+            nonlocal baseline_keys
+            latest = await monitor_snapshot()
+            if not latest:
+                raise RuntimeError("Start 点击前后端轮次基线不可用")
+            baseline_keys = latest
+            record.baseline_resolution_keys = sorted(latest)
+            store.update(record)
+
+        await adapter.start(before_click=capture_pre_click_baseline)
         record.state = AutoSessionState.RUNNING.value
         store.update(record)
         log_func(
@@ -210,11 +299,39 @@ async def run_auto_session(
             already_counted=set(record.counted_resolution_keys),
         )
         deadline = clock() + max(1, timeout)
+        final_round_paused = False
         while record.completed_rounds < record.target_rounds:
             if clock() >= deadline:
                 raise TimeoutError("Auto 会话达到硬超时")
-            keys = monitor.snapshot()
+            keys = await monitor_snapshot()
             history = await adapter.read_history_counts()
+            complete_active_pair = (
+                history.active_higher > 0 and history.active_lower > 0
+            )
+            if (
+                record.completed_rounds == record.target_rounds - 1
+                and not complete_active_pair
+            ):
+                reference_snapshot = await snapshot_reader(page)
+                if reference_snapshot.coins is not None:
+                    final_round_reference_coins = reference_snapshot.coins
+            if (
+                not final_round_paused
+                and record.completed_rounds == record.target_rounds - 1
+                and complete_active_pair
+            ):
+                if not await adapter.pause_once():
+                    raise RuntimeError("最终轮持仓出现后无法暂停 Auto")
+                final_round_paused = True
+                log_func(account_id, "最终轮持仓已出现，Auto 已暂停等待结算")
+            if final_round_paused and complete_active_pair:
+                locked_snapshot = await snapshot_reader(page)
+                if locked_snapshot.coins is not None:
+                    final_round_locked_coins = (
+                        locked_snapshot.coins
+                        if final_round_locked_coins is None
+                        else min(final_round_locked_coins, locked_snapshot.coins)
+                    )
             added = tracker.observe(keys, history)
             if added:
                 record.counted_resolution_keys.extend(added)
@@ -260,7 +377,37 @@ async def run_auto_session(
             sleep_func=sleep_func,
             poll_interval=poll_interval,
         )
-        snapshot = await snapshot_reader(page)
+        if final_round_locked_coins is None:
+            return await persist_failure("未取得最终轮扣款余额证据")
+        minimum_settled_balance = final_round_locked_coins
+        if final_round_reference_coins is not None:
+            # The Ride balance can remain at its pre-bet value for the whole
+            # active round. In that case the active-round snapshot is not a
+            # debit proof, so infer the two-coin debit floor from the latest
+            # pre-final-round balance. A genuinely observed lower debit still
+            # remains the stricter floor.
+            minimum_settled_balance = min(
+                minimum_settled_balance,
+                final_round_reference_coins - 2,
+            )
+        coin_deadline = clock() + max(10.0, settle_timeout)
+        snapshot = await _wait_coin_balance_stable(
+            page,
+            snapshot_reader,
+            deadline=coin_deadline,
+            clock=clock,
+            sleep_func=sleep_func,
+            poll_interval=poll_interval,
+            minimum_balance_exclusive=minimum_settled_balance,
+        )
+        final_auto_state = await adapter.read_state()
+        if (
+            final_auto_state.running
+            or final_auto_state.paused
+            or final_auto_state.stop_visible
+            or final_auto_state.auto_on_visible
+        ):
+            return await persist_failure("结算后仍检测到 Auto 运行")
         record.current_coins = snapshot.coins
         record.end_coins = snapshot.coins
         record.state = AutoSessionState.COMPLETED.value
@@ -278,6 +425,6 @@ async def run_auto_session(
     finally:
         if listener_attached and monitor is not None:
             try:
-                page.remove_listener("request", monitor.on_request)
+                page.remove_listener("response", monitor.on_response)
             except Exception:
                 pass

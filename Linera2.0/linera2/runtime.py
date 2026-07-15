@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable, Iterable
 
@@ -11,10 +12,11 @@ from .auto_session import AutoSessionStore
 from .hubstudio import HubstudioReadOnlyClient
 from .readiness import ReadinessResult, ReadinessState, check_account_ready
 from .store import ReadinessStore
-from .wallet_recovery import ensure_wallet_connected
+from .wallet_recovery import WalletRecoveryResult, ensure_wallet_connected
 
 
 LogFunction = Callable[[str, str], None]
+TARGET_RIDE_URL = "https://app.linera.xyz/originals/ride?market=BTC&duration=1"
 
 
 def browser_unreachable_result(account_id: str, reason: str) -> ReadinessResult:
@@ -42,6 +44,57 @@ def _default_log(account_id: str, message: str) -> None:
     print(f"[{account_id}] {message}", flush=True)
 
 
+def _is_missing_okx_popup(recovery: WalletRecoveryResult) -> bool:
+    no_popup_markers = (
+        "未检测到 OKX 钱包确认窗口",
+        "Signing 状态未恢复 OKX 确认窗口",
+        "Signing 重试未恢复 OKX 确认窗口",
+        "未找到可用的 Connect 按钮",
+        "Dynamic 弹窗中未找到 OKX Wallet",
+    )
+    return (
+        not recovery.recovered
+        and any(marker in recovery.reason for marker in no_popup_markers)
+    )
+
+
+async def _connect_account_page(
+    pw: Playwright,
+    cdp_address: str,
+    *,
+    create_if_missing: bool = False,
+):
+    browser = await pw.chromium.connect_over_cdp(
+        f"http://{cdp_address}",
+        timeout=20_000,
+    )
+    if not browser.contexts:
+        raise RuntimeError("浏览器没有可用上下文")
+
+    context = browser.contexts[0]
+    pages = [
+        page
+        for page in context.pages
+        if not (page.url or "").startswith("chrome-extension://")
+    ]
+    if not pages and create_if_missing:
+        page = await context.new_page()
+        await page.goto(
+            TARGET_RIDE_URL,
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        pages = [page]
+    if not pages:
+        raise RuntimeError("浏览器没有可用页面")
+
+    page = next(
+        (item for item in pages if (item.url or "").startswith("https://app.linera.xyz/")),
+        pages[0],
+    )
+    return browser, context, page
+
+
 async def scan_one_account(
     pw: Playwright,
     account,
@@ -65,47 +118,98 @@ async def scan_one_account(
         return result
 
     try:
-        browser = await pw.chromium.connect_over_cdp(
-            f"http://{cdp_address}",
-            timeout=20_000,
-        )
+        _browser, context, page = await _connect_account_page(pw, cdp_address)
     except Exception as exc:
         result = browser_unreachable_result(account_id, str(exc))
         store.update(result)
         log_func(display_name, f"{result.state}: {result.reason}")
         return result
 
-    if not browser.contexts:
-        result = browser_unreachable_result(account_id, "浏览器没有可用上下文")
-        store.update(result)
-        log_func(display_name, f"{result.state}: {result.reason}")
-        return result
-
-    context = browser.contexts[0]
-    pages = [page for page in context.pages if not (page.url or "").startswith("chrome-extension://")]
-    if not pages:
-        result = browser_unreachable_result(account_id, "浏览器没有可用页面")
-        store.update(result)
-        log_func(display_name, f"{result.state}: {result.reason}")
-        return result
-
-    page = next(
-        (item for item in pages if (item.url or "").startswith("https://app.linera.xyz/")),
-        pages[0],
-    )
     result = await check_account_ready(page, context, account_id, timeout=timeout)
+    first_recovery: WalletRecoveryResult | None = None
     if run_auto and result.state == ReadinessState.WALLET_DISCONNECTED.value:
         try:
-            recovery = await ensure_wallet_connected(
+            first_recovery = await ensure_wallet_connected(
                 page,
                 context,
                 account_id,
                 log_func=log_func,
             )
-            log_func(display_name, f"钱包恢复：{recovery.reason}")
+            log_func(display_name, f"钱包恢复：{first_recovery.reason}")
         except Exception as exc:
             log_func(display_name, f"钱包恢复异常：{type(exc).__name__}")
         result = await check_account_ready(page, context, account_id, timeout=timeout)
+
+    cold_restart_attempted = False
+    if (
+        run_auto
+        and result.state == ReadinessState.WALLET_DISCONNECTED.value
+        and first_recovery is not None
+        and _is_missing_okx_popup(first_recovery)
+        and not cold_restart_attempted
+    ):
+        cold_restart_attempted = True
+        log_func(display_name, "首次恢复未出现 OKX 确认窗口，执行一次冷启动重启")
+        restarted_cdp = await asyncio.to_thread(hub.restart_browser_once, account_id)
+        if not restarted_cdp:
+            result = browser_unreachable_result(
+                account_id,
+                hub.last_error or "冷启动重启未取得调试端口",
+            )
+        else:
+            try:
+                _browser, context, page = await _connect_account_page(
+                    pw,
+                    restarted_cdp,
+                    create_if_missing=True,
+                )
+            except Exception as exc:
+                result = browser_unreachable_result(
+                    account_id,
+                    f"冷启动重连失败：{exc}",
+                )
+            else:
+                result = await check_account_ready(
+                    page,
+                    context,
+                    account_id,
+                    timeout=timeout,
+                )
+                retry_recovery: WalletRecoveryResult | None = None
+                if result.state == ReadinessState.WALLET_DISCONNECTED.value:
+                    try:
+                        retry_recovery = await ensure_wallet_connected(
+                            page,
+                            context,
+                            account_id,
+                            log_func=log_func,
+                        )
+                        log_func(
+                            display_name,
+                            f"冷启动重启后钱包恢复：{retry_recovery.reason}",
+                        )
+                    except Exception as exc:
+                        retry_recovery = WalletRecoveryResult(
+                            False,
+                            f"钱包恢复异常：{type(exc).__name__}",
+                        )
+                    result = await check_account_ready(
+                        page,
+                        context,
+                        account_id,
+                        timeout=timeout,
+                    )
+                if (
+                    result.state == ReadinessState.WALLET_DISCONNECTED.value
+                    and retry_recovery is not None
+                ):
+                    result = replace(
+                        result,
+                        reason=(
+                            f"首次恢复：{first_recovery.reason}；"
+                            f"冷启动重启后：{retry_recovery.reason}"
+                        ),
+                    )
 
     store.update(result)
     log_func(
