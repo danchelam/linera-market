@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -123,14 +124,33 @@ class ManifestParsingTests(unittest.TestCase):
         invalid = (
             {"schema_version": 1},
             {"schema_version": "2"},
+            {"schema_version": 2.0},
             {"runner_version": 2},
             {"app_version": None},
+            {"task_version": 2},
+            {"base_version": None},
             {"files": {}},
             {"remove": "linera_task.py"},
         )
         for override in invalid:
             with self.subTest(override=override), self.assertRaises(ManifestError):
                 parse_manifest(manifest_json(**override))
+
+    def test_parse_manifest_preserves_optional_legacy_version_fields(self):
+        result = parse_manifest(
+            manifest_json(task_version="legacy-task", base_version="legacy-base")
+        )
+
+        self.assertEqual(result.task_version, "legacy-task")
+        self.assertEqual(result.base_version, "legacy-base")
+        defaulted = parse_manifest(manifest_json())
+        self.assertEqual((defaulted.task_version, defaulted.base_version), ("", ""))
+
+    def test_parse_manifest_still_requires_app_version(self):
+        data = json.loads(manifest_json())
+        del data["app_version"]
+        with self.assertRaises(ManifestError):
+            parse_manifest(json.dumps(data))
 
     def test_parse_manifest_allows_only_exact_legacy_removals(self):
         result = parse_manifest(
@@ -175,6 +195,21 @@ class ApplyManifestTests(unittest.TestCase):
         self.assertFalse(result.restart_required)
         self.assertEqual(live.read_bytes(), b"old")
 
+    def test_staging_failure_removes_transaction_created_install_root(self):
+        install_root = self.root / "new-install"
+        manifest = UpdateManifest(
+            2,
+            "v",
+            "v",
+            (ManifestFile("Linera2.0/linera2/runtime.py", "f" * 64),),
+            (),
+        )
+
+        result = apply_manifest(manifest, install_root, lambda _path: b"corrupt")
+
+        self.assertFalse(result.updated)
+        self.assertFalse(install_root.exists())
+
     def test_direct_manifest_model_cannot_bypass_path_validation(self):
         outside = self.root.parent / "outside-runner-test.py"
         outside.unlink(missing_ok=True)
@@ -191,6 +226,34 @@ class ApplyManifestTests(unittest.TestCase):
 
         self.assertFalse(result.updated)
         self.assertFalse(outside.exists())
+
+    def test_direct_manifest_model_rejects_float_schema_version(self):
+        manifest = UpdateManifest(
+            2.0,
+            "v",
+            "v",
+            (ManifestFile("Linera2.0/linera2/runtime.py", digest(b"new")),),
+            (),
+        )
+
+        result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "invalid manifest")
+
+    def test_direct_manifest_model_rejects_empty_app_version(self):
+        manifest = UpdateManifest(
+            2,
+            "v",
+            "",
+            (ManifestFile("Linera2.0/linera2/runtime.py", digest(b"new")),),
+            (),
+        )
+
+        result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "invalid manifest")
 
     def test_parent_symlink_cannot_escape_install_root(self):
         outside_dir = tempfile.TemporaryDirectory()
@@ -271,6 +334,70 @@ class ApplyManifestTests(unittest.TestCase):
         self.assertFalse((self.root / "Linera2.0/templates").exists())
         self.assertEqual(existing.read_bytes(), b"old-b")
 
+    def test_replace_failure_removes_transaction_created_install_root(self):
+        install_root = self.root / "new-install"
+        payloads = {
+            "Linera2.0/linera2/a.py": b"new-a",
+            "Linera2.0/linera2/b.py": b"new-b",
+        }
+        manifest = manifest_for(tuple(payloads.items()))
+
+        with patch("linera_runner.os.replace", side_effect=[None, OSError("locked")]):
+            result = apply_manifest(manifest, install_root, payloads.__getitem__)
+
+        self.assertFalse(result.updated)
+        self.assertFalse(install_root.exists())
+
+    def test_unsafe_target_reports_when_prior_file_rollback_fails(self):
+        self.write_live("Linera2.0/linera2/a.py", b"old-a")
+        (self.root / "Linera2.0/linera2/b.py").mkdir()
+        payloads = {
+            "Linera2.0/linera2/a.py": b"new-a",
+            "Linera2.0/linera2/b.py": b"new-b",
+        }
+        manifest = manifest_for(tuple(payloads.items()))
+        real_replace = os.replace
+
+        def fail_backup_restore(source, destination):
+            if "backups" in str(source):
+                raise OSError("restore locked")
+            return real_replace(source, destination)
+
+        with patch("linera_runner.os.replace", side_effect=fail_backup_restore):
+            result = apply_manifest(manifest, self.root, payloads.__getitem__)
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "unsafe update target and rollback failed")
+
+    def test_backup_failure_reports_when_prior_file_rollback_fails(self):
+        self.write_live("Linera2.0/linera2/a.py", b"old-a")
+        self.write_live("Linera2.0/linera2/b.py", b"old-b")
+        payloads = {
+            "Linera2.0/linera2/a.py": b"new-a",
+            "Linera2.0/linera2/b.py": b"new-b",
+        }
+        manifest = manifest_for(tuple(payloads.items()))
+        real_replace = os.replace
+        real_copy = shutil.copy2
+
+        def fail_backup_restore(source, destination):
+            if "backups" in str(source):
+                raise OSError("restore locked")
+            return real_replace(source, destination)
+
+        def fail_second_backup(source, destination):
+            if str(source).endswith("b.py"):
+                raise OSError("backup locked")
+            return real_copy(source, destination)
+
+        with patch("linera_runner.os.replace", side_effect=fail_backup_restore), patch(
+            "linera_runner.shutil.copy2", side_effect=fail_second_backup
+        ):
+            result = apply_manifest(manifest, self.root, payloads.__getitem__)
+
+        self.assertFalse(result.updated)
+        self.assertEqual(result.reason, "backup and rollback failed")
+
     def test_success_replaces_changed_files_and_skips_unchanged_fetch(self):
         unchanged = self.write_live("Linera2.0/linera2/a.py", b"same")
         changed = self.write_live("Linera2.0/linera2/b.py", b"old")
@@ -313,7 +440,8 @@ class ApplyManifestTests(unittest.TestCase):
             remove=("linera_task.py",),
         )
 
-        result = apply_manifest(manifest, self.root, lambda _path: b"runtime")
+        with patch.dict(os.environ, {"OKX_WALLET_PASSWORD": "configured"}):
+            result = apply_manifest(manifest, self.root, lambda _path: b"runtime")
 
         self.assertTrue(result.updated)
         self.assertFalse(legacy.exists())
@@ -343,7 +471,8 @@ class ApplyManifestTests(unittest.TestCase):
             remove=("linera_task.py", "base_module.py"),
         )
 
-        result = apply_manifest(manifest, self.root, lambda _path: b"new")
+        with patch.dict(os.environ, {"OKX_WALLET_PASSWORD": "configured"}):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
 
         self.assertFalse(result.updated)
         self.assertEqual(runtime.read_bytes(), b"old")
@@ -365,11 +494,80 @@ class ApplyManifestTests(unittest.TestCase):
                 raise OSError("restore locked")
             return real_replace(source, destination)
 
-        with patch("linera_runner.os.replace", side_effect=fail_removal_restore):
+        with patch.dict(os.environ, {"OKX_WALLET_PASSWORD": "configured"}), patch(
+            "linera_runner.os.replace", side_effect=fail_removal_restore
+        ):
             result = apply_manifest(manifest, self.root, lambda _path: b"new")
 
         self.assertFalse(result.updated)
         self.assertEqual(result.reason, "removal and rollback failed")
+
+    def test_private_config_unavailable_skips_all_legacy_removals(self):
+        runtime = self.write_live("Linera2.0/linera2/runtime.py", b"old")
+        task = self.write_live("linera_task.py", b"legacy-task")
+        base = self.write_live("base_module.py", b"no private assignment")
+        manifest = manifest_for(
+            (("Linera2.0/linera2/runtime.py", b"new"),),
+            remove=("linera_task.py", "base_module.py"),
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertTrue(result.updated)
+        self.assertEqual(runtime.read_bytes(), b"new")
+        self.assertTrue(task.exists())
+        self.assertTrue(base.exists())
+        self.assertEqual(
+            result.reason,
+            "updated; legacy removal skipped/private config unavailable",
+        )
+
+    def test_private_config_is_migrated_before_base_module_removal(self):
+        self.write_live("Linera2.0/linera2/runtime.py", b"old")
+        base = self.write_live(
+            "base_module.py", b'OKX_DEFAULT_PASSWORD = "legacy-private"\n'
+        )
+        manifest = manifest_for(
+            (("Linera2.0/linera2/runtime.py", b"new"),),
+            remove=("base_module.py",),
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertTrue(result.updated)
+        self.assertFalse(base.exists())
+        config = json.loads(
+            (self.root / "Linera2.0/local_config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(config, {"wallet_password": "legacy-private"})
+
+    def test_private_config_write_error_skips_all_legacy_removals(self):
+        runtime = self.write_live("Linera2.0/linera2/runtime.py", b"old")
+        task = self.write_live("linera_task.py", b"legacy-task")
+        base = self.write_live(
+            "base_module.py", b'OKX_DEFAULT_PASSWORD = "legacy-private"\n'
+        )
+        manifest = manifest_for(
+            (("Linera2.0/linera2/runtime.py", b"new"),),
+            remove=("linera_task.py", "base_module.py"),
+        )
+
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "linera_runner._atomic_write_private_config",
+            side_effect=OSError("write denied"),
+        ):
+            result = apply_manifest(manifest, self.root, lambda _path: b"new")
+
+        self.assertTrue(result.updated)
+        self.assertEqual(runtime.read_bytes(), b"new")
+        self.assertTrue(task.exists())
+        self.assertTrue(base.exists())
+        self.assertEqual(
+            result.reason,
+            "updated; legacy removal skipped/private config unavailable",
+        )
 
     def test_sensitive_values_never_reach_output_or_result_reason(self):
         secret_download = b"download-secret-marker"

@@ -53,6 +53,8 @@ class UpdateManifest:
     app_version: str
     files: tuple[ManifestFile, ...]
     remove: tuple[str, ...]
+    task_version: str = ""
+    base_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,13 @@ def _manifest_string(data: dict, name: str) -> str:
     return value
 
 
+def _optional_manifest_string(data: dict, name: str) -> str:
+    value = data.get(name, "")
+    if not isinstance(value, str):
+        raise ManifestError(f"invalid {name}")
+    return value
+
+
 def parse_manifest(payload: str) -> UpdateManifest:
     """Parse and strictly validate a schema-v2 update manifest."""
     if not isinstance(payload, str):
@@ -98,13 +107,14 @@ def parse_manifest(payload: str) -> UpdateManifest:
         raise ManifestError("invalid manifest JSON") from error
     if not isinstance(data, dict):
         raise ManifestError("manifest must be an object")
-    if data.get("schema_version") != 2 or isinstance(
-        data.get("schema_version"), bool
-    ):
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
         raise ManifestError("unsupported manifest schema")
 
     runner_version = _manifest_string(data, "runner_version")
     app_version = _manifest_string(data, "app_version")
+    task_version = _optional_manifest_string(data, "task_version")
+    base_version = _optional_manifest_string(data, "base_version")
     raw_files = data.get("files")
     raw_removals = data.get("remove")
     if not isinstance(raw_files, list):
@@ -142,6 +152,8 @@ def parse_manifest(payload: str) -> UpdateManifest:
         app_version=app_version,
         files=tuple(files),
         remove=tuple(removals),
+        task_version=task_version,
+        base_version=base_version,
     )
 
 
@@ -197,10 +209,21 @@ def _changed_entries(
 
 
 def _validate_manifest_for_apply(manifest: UpdateManifest) -> None:
-    if not isinstance(manifest, UpdateManifest) or manifest.schema_version != 2:
+    if (
+        not isinstance(manifest, UpdateManifest)
+        or type(manifest.schema_version) is not int
+        or manifest.schema_version != 2
+    ):
         raise ManifestError("invalid manifest model")
-    if not isinstance(manifest.runner_version, str) or not isinstance(
-        manifest.app_version, str
+    if (
+        not isinstance(manifest.runner_version, str)
+        or not manifest.runner_version
+        or not isinstance(manifest.app_version, str)
+        or not manifest.app_version
+    ):
+        raise ManifestError("invalid manifest model")
+    if not isinstance(manifest.task_version, str) or not isinstance(
+        manifest.base_version, str
     ):
         raise ManifestError("invalid manifest model")
     seen_paths: set[str] = set()
@@ -302,20 +325,35 @@ def _replace_with_rollback(
             )
             live = _safe_install_path(install_root, entry.path)
         except (ManifestError, OSError):
-            _restore_replaced(replaced, created_directories)
-            return UpdateResult(False, False, "unsafe update target"), [], []
+            restored = _restore_replaced(replaced, created_directories)
+            reason = (
+                "unsafe update target"
+                if restored
+                else "unsafe update target and rollback failed"
+            )
+            return UpdateResult(False, False, reason), [], []
         backup: Path | None = None
         if live.exists():
             if not live.is_file() or live.is_symlink():
-                _restore_replaced(replaced, created_directories)
-                return UpdateResult(False, False, "unsafe update target"), [], []
+                restored = _restore_replaced(replaced, created_directories)
+                reason = (
+                    "unsafe update target"
+                    if restored
+                    else "unsafe update target and rollback failed"
+                )
+                return UpdateResult(False, False, reason), [], []
             backup = temporary_root / "backups" / entry.path
             backup.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(live, backup)
             except OSError:
-                _restore_replaced(replaced, created_directories)
-                return UpdateResult(False, False, "backup failed"), [], []
+                restored = _restore_replaced(replaced, created_directories)
+                reason = (
+                    "backup failed"
+                    if restored
+                    else "backup and rollback failed"
+                )
+                return UpdateResult(False, False, reason), [], []
         try:
             os.replace(staged_path, live)
         except OSError:
@@ -374,37 +412,62 @@ def apply_manifest(
     if not changed:
         return UpdateResult(False, False, "up to date")
 
-    install_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
-        temporary_root = Path(temp_name)
-        try:
-            staged = _stage_and_verify(changed, temporary_root, fetch_file)
-        except (ManifestError, OSError, TypeError):
-            return UpdateResult(False, False, "staging verification failed")
-        result, replaced_files, created_directories = _replace_with_rollback(
-            staged, install_root, temporary_root
-        )
-        if not result.updated:
-            return result
-        try:
-            removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
-                manifest.remove, install_root, temporary_root
+    install_root_created = not install_root.exists()
+    try:
+        install_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
+            temporary_root = Path(temp_name)
+            try:
+                staged = _stage_and_verify(changed, temporary_root, fetch_file)
+            except (ManifestError, OSError, TypeError):
+                return UpdateResult(False, False, "staging verification failed")
+            result, replaced_files, created_directories = _replace_with_rollback(
+                staged, install_root, temporary_root
             )
-        except (ManifestError, AttributeError, TypeError):
-            removals_ok = False
-            removal_rollback_ok = False
-        if not removals_ok:
-            restored = _restore_replaced(replaced_files, created_directories)
-            reason = (
-                "removal failed"
-                if restored and removal_rollback_ok
-                else "removal and rollback failed"
+            if not result.updated:
+                return result
+            restart_required = any(
+                item.path == "linera_runner.py" for item in changed
             )
-            return UpdateResult(False, False, reason)
+            private_config_ready = True
+            if manifest.remove:
+                try:
+                    private_config_ready = migrate_private_config(install_root)
+                except (OSError, UnicodeError):
+                    private_config_ready = False
+            if not private_config_ready:
+                return UpdateResult(
+                    updated=True,
+                    restart_required=restart_required,
+                    reason=(
+                        "updated; legacy removal skipped/private config unavailable"
+                    ),
+                )
+            try:
+                removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
+                    manifest.remove, install_root, temporary_root
+                )
+            except (ManifestError, AttributeError, TypeError):
+                removals_ok = False
+                removal_rollback_ok = False
+            if not removals_ok:
+                restored = _restore_replaced(replaced_files, created_directories)
+                reason = (
+                    "removal failed"
+                    if restored and removal_rollback_ok
+                    else "removal and rollback failed"
+                )
+                return UpdateResult(False, False, reason)
+    finally:
+        if install_root_created:
+            try:
+                install_root.rmdir()
+            except OSError:
+                pass
 
     return replace(
         result,
-        restart_required=any(item.path == "linera_runner.py" for item in changed),
+        restart_required=restart_required,
     )
 
 
@@ -422,9 +485,9 @@ def _read_local_password(config_path: Path) -> str | None:
 
 
 def _atomic_write_private_config(target: Path, password: str) -> bool:
-    target.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
