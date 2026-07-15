@@ -15,8 +15,14 @@ from linera2.cli import build_parser, default_account_file  # noqa: E402
 
 class CliTests(unittest.TestCase):
     def test_default_account_file_is_parent_hubshuju(self):
-        expected = PROJECT_ROOT.parent / "hubshuju.xlsx"
-        self.assertEqual(default_account_file(), expected)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir) / "Linera2.0"
+            project_dir.mkdir()
+            expected = project_dir.parent / "hubshuju.xlsx"
+            expected.touch()
+            self.assertFalse((project_dir / "hubshuju.xlsx").exists())
+            with patch.object(cli, "PROJECT_DIR", project_dir):
+                self.assertEqual(default_account_file(), expected)
 
     def test_default_account_file_prefers_project_copy(self):
         with tempfile.TemporaryDirectory() as temp_dir:

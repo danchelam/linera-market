@@ -36,7 +36,8 @@ class LocalSupportTests(unittest.TestCase):
             'OKX_DEFAULT_PASSWORD = "local-secret"\nOTHER = "ignored"',
             encoding="utf-8",
         )
-        self.assertTrue(migrate_legacy_wallet_password(self.root, legacy))
+        with patch.dict(os.environ, {"OKX_WALLET_PASSWORD": ""}):
+            self.assertTrue(migrate_legacy_wallet_password(self.root, legacy))
         self.assertEqual(
             load_local_config(self.root), {"wallet_password": "local-secret"}
         )
