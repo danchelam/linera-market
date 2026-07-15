@@ -1,579 +1,465 @@
-"""
-Linera Prediction Market — 启动器 + Web 控制台
-───────────────────────────────────────────────
-功能：
-  1. 启动时从 GitHub 自动检查 / 下载最新 linera_task.py & base_module.py & linera_runner.py
-  2. 动态加载外部脚本（热更新：替换 .py 即可，无需重新打包 exe）
-  3. Flask + SocketIO Web 面板控制任务启停、查看日志
-  4. 打包为 exe 后，业务逻辑全部通过外部 .py 文件加载
-  5. linera_runner.py 自身热更新后自动重启
+"""Linera 2.0 bootstrap update primitives.
+
+This module deliberately has no import-time network, launch, or filesystem
+side effects.  The update bridge and command-line entry point are layered on
+top of these primitives.
 """
 
-__version__ = "2026.06.06.1"
+from __future__ import annotations
 
-from flask import Flask, render_template, jsonify
-from flask_socketio import SocketIO, emit
-import subprocess
-import threading
-import asyncio
-import time
-import datetime
-import os
-import sys
-import importlib.util
-import re
+import hashlib
 import json
-import urllib.request
-import urllib.error
-
-# ═══════════════════════════════════════════════
-#  路径工具
-# ═══════════════════════════════════════════════
-
-def get_base_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+import os
+import re
+import shutil
+import tempfile
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import Callable
 
 
-def get_resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
+__version__ = "2026.07.16.1"
 
 
-# ═══════════════════════════════════════════════
-#  Flask 应用初始化
-# ═══════════════════════════════════════════════
+ALLOWED_PREFIXES = ("Linera2.0/linera2/", "Linera2.0/templates/")
+ALLOWED_ROOT_FILES = {
+    "linera_runner.py",
+    "Linera2.0/requirements.txt",
+    "Linera2.0/README.md",
+}
+ALLOWED_REMOVALS = {"linera_task.py", "base_module.py", "test_full_flow.py"}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_LEGACY_PASSWORD_PATTERN = re.compile(
+    r'^OKX_DEFAULT_PASSWORD\s*=\s*["\']([^"\']+)["\']',
+    re.M,
+)
 
-template_dir = os.path.join(get_base_dir(), "templates")
-if not os.path.exists(template_dir):
-    template_dir = get_resource_path(os.path.join("Linera", "templates"))
-if not os.path.exists(template_dir):
-    template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-app = Flask(__name__, template_folder=template_dir)
-app.config['SECRET_KEY'] = 'linera-secret'
-socketio = SocketIO(app, async_mode='threading')
+class ManifestError(ValueError):
+    """Raised when a release manifest violates the schema or path policy."""
 
-# ═══════════════════════════════════════════════
-#  自动更新配置 — 替换为你自己的 GitHub Raw URL
-# ═══════════════════════════════════════════════
 
-CHECK_UPDATE_ON_START = True
+@dataclass(frozen=True)
+class ManifestFile:
+    path: str
+    sha256: str
 
-# 状态上报地址（tasks_manager），Runner 会每 2 秒推送一次状态
-REPORT_URL = "http://100.103.90.123:8888/api/linera_report"
-RUNNER_NAME = os.environ.get("RUNNER_NAME", "")
 
-_GH_RAW = "https://raw.githubusercontent.com/danchelam/linera-market/refs/heads/main"
-_CDN_RAW = "https://cdn.jsdelivr.net/gh/danchelam/linera-market@main"
-UPDATE_META_URL = f"{_GH_RAW}/version.json"
-UPDATE_TASK_URL = f"{_GH_RAW}/linera_task.py"
-UPDATE_BASE_URL = f"{_GH_RAW}/base_module.py"
-UPDATE_RUNNER_URL = f"{_GH_RAW}/linera_runner.py"
-_CDN_META_URL = f"{_CDN_RAW}/version.json"
-_CDN_TASK_URL = f"{_CDN_RAW}/linera_task.py"
-_CDN_BASE_URL = f"{_CDN_RAW}/base_module.py"
-_CDN_RUNNER_URL = f"{_CDN_RAW}/linera_runner.py"
+@dataclass(frozen=True)
+class UpdateManifest:
+    schema_version: int
+    runner_version: str
+    app_version: str
+    files: tuple[ManifestFile, ...]
+    remove: tuple[str, ...]
 
-LAST_TASK_VERSION = "0"
-LAST_BASE_VERSION = "0"
-LAST_RUNNER_VERSION = __version__
-LAST_REMOTE_TASK_VERSION = ""
-LAST_REMOTE_BASE_VERSION = ""
-LAST_REMOTE_RUNNER_VERSION = ""
-LAST_UPDATE_STATUS = "unknown"
 
-# ═══════════════════════════════════════════════
-#  版本读取 / 比较 / 更新
-# ═══════════════════════════════════════════════
+@dataclass(frozen=True)
+class UpdateResult:
+    updated: bool
+    restart_required: bool
+    reason: str
 
-def read_local_version(script_path: str) -> str:
-    if not os.path.exists(script_path):
-        return "0"
+
+def validate_relative_path(value: str) -> str:
+    """Return the canonical manifest path or reject it as unsafe."""
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ManifestError("unsafe manifest path")
+    candidate = PurePosixPath(value)
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or re.match(r"^[A-Za-z]:", value)
+    ):
+        raise ManifestError("unsafe manifest path")
+    normalized = candidate.as_posix()
+    if normalized not in ALLOWED_ROOT_FILES and not normalized.startswith(
+        ALLOWED_PREFIXES
+    ):
+        raise ManifestError("path outside update allowlist")
+    return normalized
+
+
+def _manifest_string(data: dict, name: str) -> str:
+    value = data.get(name)
+    if not isinstance(value, str) or not value:
+        raise ManifestError(f"invalid {name}")
+    return value
+
+
+def parse_manifest(payload: str) -> UpdateManifest:
+    """Parse and strictly validate a schema-v2 update manifest."""
+    if not isinstance(payload, str):
+        raise ManifestError("manifest payload must be text")
     try:
-        with open(script_path, "r", encoding="utf-8") as f:
-            content = f.read(4096)
-        m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", content)
-        return m.group(1) if m else "0"
-    except Exception:
-        return "0"
+        data = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise ManifestError("invalid manifest JSON") from error
+    if not isinstance(data, dict):
+        raise ManifestError("manifest must be an object")
+    if data.get("schema_version") != 2 or isinstance(
+        data.get("schema_version"), bool
+    ):
+        raise ManifestError("unsupported manifest schema")
+
+    runner_version = _manifest_string(data, "runner_version")
+    app_version = _manifest_string(data, "app_version")
+    raw_files = data.get("files")
+    raw_removals = data.get("remove")
+    if not isinstance(raw_files, list):
+        raise ManifestError("manifest files must be a list")
+    if not isinstance(raw_removals, list):
+        raise ManifestError("manifest remove must be a list")
+
+    files: list[ManifestFile] = []
+    seen_paths: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, dict):
+            raise ManifestError("invalid manifest file entry")
+        path = validate_relative_path(item.get("path"))
+        file_hash = item.get("sha256")
+        if not isinstance(file_hash, str) or not _SHA256_PATTERN.fullmatch(file_hash):
+            raise ManifestError("invalid SHA-256")
+        if path in seen_paths:
+            raise ManifestError("duplicate manifest path")
+        seen_paths.add(path)
+        files.append(ManifestFile(path, file_hash))
+
+    removals: list[str] = []
+    seen_removals: set[str] = set()
+    for item in raw_removals:
+        if not isinstance(item, str) or item not in ALLOWED_REMOVALS:
+            raise ManifestError("removal outside legacy allowlist")
+        if item in seen_removals:
+            raise ManifestError("duplicate removal path")
+        seen_removals.add(item)
+        removals.append(item)
+
+    return UpdateManifest(
+        schema_version=2,
+        runner_version=runner_version,
+        app_version=app_version,
+        files=tuple(files),
+        remove=tuple(removals),
+    )
 
 
-def parse_version(v: str):
-    nums = re.findall(r"\d+", v)
-    return tuple(int(x) for x in nums) if nums else (0,)
+def sha256_file(path: Path) -> str:
+    """Hash raw file bytes without loading private content into logs."""
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
-def _url_fetch(url: str, timeout: int = 15) -> str:
-    """下载 URL 内容，返回文本；失败返回空字符串"""
-    ts = int(time.time())
-    full = f"{url}{'&' if '?' in url else '?'}t={ts}"
-    with urllib.request.urlopen(full, timeout=timeout) as resp:
-        return resp.read().decode("utf-8")
+def _safe_install_path(install_root: Path, relative: str) -> Path:
+    root = install_root.resolve()
+    target = install_root / relative
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError) as error:
+        raise ManifestError("update path escapes install root") from error
 
-
-def fetch_remote_versions() -> dict:
-    if not UPDATE_META_URL:
-        return {}
-    for label, meta_url in [("GitHub", UPDATE_META_URL), ("CDN", _CDN_META_URL)]:
-        try:
-            print(f"【更新】检查更新: {meta_url}")
-            data = _url_fetch(meta_url, timeout=10).strip().lstrip("\ufeff")
-            if data.startswith("{"):
-                return json.loads(data)
-        except Exception as e:
-            print(f"【更新】{label} 获取失败: {e}，尝试备用源...")
-    print("【更新】所有源均失败，无法获取远程版本。")
-    return {}
-
-
-def download_script(url: str) -> str:
-    if not url:
-        return ""
-    cdn_url = url.replace(_GH_RAW, _CDN_RAW) if _GH_RAW in url else ""
-    for label, dl_url in [("GitHub", url), ("CDN", cdn_url)]:
-        if not dl_url:
+    cursor = install_root
+    for part in PurePosixPath(relative).parts[:-1]:
+        cursor /= part
+        if not cursor.exists() and not cursor.is_symlink():
             continue
         try:
-            return _url_fetch(dl_url, timeout=30)
-        except Exception as e:
-            print(f"【更新】{label} 下载失败: {e}，尝试备用源...")
-    print("【更新】所有源均下载失败。")
-    return ""
+            metadata = os.lstat(cursor)
+        except OSError as error:
+            raise ManifestError("unsafe update path component") from error
+        if cursor.is_symlink() or (
+            getattr(metadata, "st_file_attributes", 0)
+            & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ManifestError("unsafe update path component")
+    return target
 
 
-def update_single_script(name: str, local_path: str, remote_version: str, download_url: str) -> bool:
-    local_version = read_local_version(local_path)
-    if not remote_version:
-        return False
-    if parse_version(remote_version) <= parse_version(local_version):
-        print(f"【更新】{name} 已是最新: {local_version}")
-        return False
-
-    print(f"【更新】{name} 发现新版本: {remote_version}（本地: {local_version}），下载中...")
-    new_code = download_script(download_url)
-    if not new_code:
-        print(f"【更新】{name} 下载失败")
-        return False
-
-    try:
-        if os.path.exists(local_path):
-            with open(local_path, "r", encoding="utf-8") as f:
-                old = f.read()
-            with open(local_path + ".bak", "w", encoding="utf-8") as f:
-                f.write(old)
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.write(new_code)
-        print(f"【更新】{name} 更新成功 → {remote_version}")
-        return True
-    except Exception as e:
-        print(f"【更新】{name} 写入失败: {e}")
-        return False
+def _changed_entries(
+    entries: tuple[ManifestFile, ...], install_root: Path
+) -> tuple[ManifestFile, ...]:
+    changed: list[ManifestFile] = []
+    for entry in entries:
+        target = _safe_install_path(install_root, entry.path)
+        if target.is_symlink():
+            raise ManifestError("update target must not be a symlink")
+        try:
+            current_hash = sha256_file(target)
+        except (FileNotFoundError, IsADirectoryError, PermissionError, OSError):
+            current_hash = None
+        if current_hash != entry.sha256:
+            changed.append(entry)
+    return tuple(changed)
 
 
-def _restart_self():
-    """替换完 runner 后重启自身"""
-    print("【更新】linera_runner 已更新，正在自动重启...")
-    time.sleep(1)
-    python = sys.executable
-    script = os.path.abspath(__file__)
-    if getattr(sys, 'frozen', False):
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    else:
-        os.execv(python, [python, script] + sys.argv[1:])
+def _validate_manifest_for_apply(manifest: UpdateManifest) -> None:
+    if not isinstance(manifest, UpdateManifest) or manifest.schema_version != 2:
+        raise ManifestError("invalid manifest model")
+    if not isinstance(manifest.runner_version, str) or not isinstance(
+        manifest.app_version, str
+    ):
+        raise ManifestError("invalid manifest model")
+    seen_paths: set[str] = set()
+    for entry in manifest.files:
+        if not isinstance(entry, ManifestFile):
+            raise ManifestError("invalid manifest file entry")
+        normalized = validate_relative_path(entry.path)
+        if normalized != entry.path or normalized in seen_paths:
+            raise ManifestError("invalid manifest path")
+        if not isinstance(entry.sha256, str) or not _SHA256_PATTERN.fullmatch(
+            entry.sha256
+        ):
+            raise ManifestError("invalid SHA-256")
+        seen_paths.add(normalized)
+    seen_removals: set[str] = set()
+    for relative in manifest.remove:
+        if relative not in ALLOWED_REMOVALS or relative in seen_removals:
+            raise ManifestError("invalid removal path")
+        seen_removals.add(relative)
 
 
-def try_auto_update():
-    global LAST_TASK_VERSION, LAST_BASE_VERSION, LAST_RUNNER_VERSION
-    global LAST_REMOTE_TASK_VERSION, LAST_REMOTE_BASE_VERSION, LAST_REMOTE_RUNNER_VERSION
-    global LAST_UPDATE_STATUS
+def _stage_and_verify(
+    changed: tuple[ManifestFile, ...],
+    staging_root: Path,
+    fetch_file: Callable[[str], bytes],
+) -> tuple[tuple[ManifestFile, Path], ...]:
+    staged: list[tuple[ManifestFile, Path]] = []
+    for entry in changed:
+        content = fetch_file(entry.path)
+        if not isinstance(content, bytes):
+            raise TypeError("downloaded file must be bytes")
+        target = staging_root / "staged" / entry.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        if sha256_file(target) != entry.sha256:
+            raise ManifestError("downloaded file hash mismatch")
+        staged.append((entry, target))
+    return tuple(staged)
 
-    if not CHECK_UPDATE_ON_START:
-        print("【更新】自动更新已关闭。")
-        LAST_UPDATE_STATUS = "disabled"
-        return
-    if not UPDATE_META_URL:
-        print("【更新】未配置 UPDATE_META_URL，跳过自动更新。")
-        LAST_UPDATE_STATUS = "no_config"
-        return
 
-    remote = fetch_remote_versions()
-    if not remote:
-        LAST_UPDATE_STATUS = "remote_unavailable"
-        return
-    print(f"【更新】远程版本: {remote}")
+def _remove_created_directories(created_directories: list[Path]) -> bool:
+    restored = True
+    for directory in reversed(created_directories):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            restored = False
+    return restored
 
-    base_dir = get_base_dir()
-    task_path = os.path.join(base_dir, "linera_task.py")
-    base_path = os.path.join(base_dir, "base_module.py")
 
-    LAST_REMOTE_TASK_VERSION = remote.get("task_version", "")
-    LAST_REMOTE_BASE_VERSION = remote.get("base_version", "")
-    LAST_REMOTE_RUNNER_VERSION = remote.get("runner_version", "")
-
-    updated = False
-    if UPDATE_TASK_URL and LAST_REMOTE_TASK_VERSION:
-        if update_single_script("linera_task", task_path, LAST_REMOTE_TASK_VERSION, UPDATE_TASK_URL):
-            updated = True
-    if UPDATE_BASE_URL and LAST_REMOTE_BASE_VERSION:
-        if update_single_script("base_module", base_path, LAST_REMOTE_BASE_VERSION, UPDATE_BASE_URL):
-            updated = True
-
-    LAST_TASK_VERSION = read_local_version(task_path)
-    LAST_BASE_VERSION = read_local_version(base_path)
-    LAST_UPDATE_STATUS = "updated" if updated else "up_to_date"
-
-    # runner 自更新（仅非 frozen 模式，exe 包内的 runner 无法热替换）
-    if getattr(sys, 'frozen', False):
-        print(f"【更新】linera_runner (exe 模式) 跳过自更新: {__version__}")
-    elif UPDATE_RUNNER_URL and LAST_REMOTE_RUNNER_VERSION:
-        runner_path = os.path.abspath(__file__)
-        local_runner_ver = __version__
-        if parse_version(LAST_REMOTE_RUNNER_VERSION) > parse_version(local_runner_ver):
-            print(f"【更新】linera_runner 发现新版本: {LAST_REMOTE_RUNNER_VERSION}（本地: {local_runner_ver}），下载中...")
-            new_code = download_script(UPDATE_RUNNER_URL)
-            if new_code:
-                try:
-                    with open(runner_path, "r", encoding="utf-8") as f:
-                        old = f.read()
-                    with open(runner_path + ".bak", "w", encoding="utf-8") as f:
-                        f.write(old)
-                    with open(runner_path, "w", encoding="utf-8") as f:
-                        f.write(new_code)
-                    print(f"【更新】linera_runner 更新成功 → {LAST_REMOTE_RUNNER_VERSION}")
-                    _restart_self()
-                except Exception as e:
-                    print(f"【更新】linera_runner 写入失败: {e}")
+def _restore_replaced(
+    replaced: list[tuple[Path, Path | None]],
+    created_directories: list[Path] | None = None,
+) -> bool:
+    restored = True
+    for live, backup in reversed(replaced):
+        try:
+            if backup is None:
+                live.unlink(missing_ok=True)
             else:
-                print("【更新】linera_runner 下载失败")
-        else:
-            print(f"【更新】linera_runner 已是最新: {local_runner_ver}")
-    LAST_RUNNER_VERSION = __version__
+                os.replace(backup, live)
+        except OSError:
+            restored = False
+    if created_directories is not None:
+        restored = _remove_created_directories(created_directories) and restored
+    return restored
 
 
-# ═══════════════════════════════════════════════
-#  动态加载核心模块
-# ═══════════════════════════════════════════════
+def _mkdir_parents_tracked(
+    parent: Path, install_root: Path, created_directories: list[Path]
+) -> None:
+    missing: list[Path] = []
+    cursor = parent
+    while cursor != install_root and not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    created_directories.extend(reversed(missing))
 
-def _load_module_from_file(name: str, path: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
-
-def load_core_modules():
-    """
-    加载 base_module.py 和 linera_task.py。
-    优先从 exe 同级目录加载外部文件；失败则回退到内置版本。
-    返回 (base_mod, task_mod) 或 (None, None)。
-    """
-    base_dir = get_base_dir()
-    base_path = os.path.join(base_dir, "base_module.py")
-    task_path = os.path.join(base_dir, "linera_task.py")
-
-    base_mod = None
-    task_mod = None
-
-    # 加载 base_module
-    if os.path.exists(base_path):
-        print(f"【热更新】加载外部 base_module: {base_path}")
+def _replace_with_rollback(
+    staged: tuple[tuple[ManifestFile, Path], ...],
+    install_root: Path,
+    temporary_root: Path,
+) -> tuple[
+    UpdateResult,
+    list[tuple[Path, Path | None]],
+    list[Path],
+]:
+    replaced: list[tuple[Path, Path | None]] = []
+    created_directories: list[Path] = []
+    for entry, staged_path in staged:
         try:
-            base_mod = _load_module_from_file("base_module", base_path)
-        except Exception as e:
-            print(f"【热更新】加载 base_module 失败: {e}")
-
-    if base_mod is None:
-        print("【系统】回退到内置 base_module")
-        try:
-            import base_module as base_mod
-        except ImportError as e:
-            print(f"【错误】无法加载 base_module: {e}")
-            return None, None
-
-    # 加载 linera_task (依赖 base_module 已在 sys.modules)
-    if os.path.exists(task_path):
-        print(f"【热更新】加载外部 linera_task: {task_path}")
-        try:
-            task_mod = _load_module_from_file("linera_task", task_path)
-        except Exception as e:
-            print(f"【热更新】加载 linera_task 失败: {e}")
-
-    if task_mod is None:
-        print("【系统】回退到内置 linera_task")
-        try:
-            import linera_task as task_mod
-        except ImportError as e:
-            print(f"【错误】无法加载 linera_task: {e}")
-            return base_mod, None
-
-    return base_mod, task_mod
-
-
-# ═══════════════════════════════════════════════
-#  启动时初始化
-# ═══════════════════════════════════════════════
-
-try_auto_update()
-base_module, task_module = load_core_modules()
-
-_task_ver = getattr(task_module, '__version__', '?') if task_module else '未加载'
-_base_ver = getattr(base_module, '__version__', '?') if base_module else '未加载'
-print(f"【版本】linera_task: {_task_ver} | base_module: {_base_ver} | runner: {__version__}")
-
-task_thread = None
-is_task_running = False
-
-
-def log_emitter(msg):
-    socketio.emit('new_log', msg)
-
-
-if base_module:
-    base_module.set_logger_callback(log_emitter)
-
-# ═══════════════════════════════════════════════
-#  每日清除进度文件（runner 层面兜底，不依赖 task 模块版本）
-# ═══════════════════════════════════════════════
-
-_last_clear_date = ""
-
-def _business_date():
-    """业务日期：每日任务在 UTC 0:00（北京时间 8:00）重置"""
-    return (datetime.datetime.now() - datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
-
-
-def _clear_daily_files():
-    """检查并清除过期的进度文件，确保每天第一次启动时是干净的"""
-    global _last_clear_date
-    import json as _json
-    today_str = _business_date()
-    if _last_clear_date == today_str:
-        return
-    _last_clear_date = today_str
-
-    base_dir = get_base_dir()
-    for fname in ("account_targets.json", "task_status.json"):
-        fpath = os.path.join(base_dir, fname)
-        if not os.path.exists(fpath):
-            continue
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = _json.load(f)
-            saved_date = data.get("_date", "")
-            if saved_date == today_str:
-                continue
-            os.remove(fpath)
-            log_emitter(f"【清除】{fname} 已过期（{saved_date or '无日期'}），已删除")
-        except Exception:
+            live = _safe_install_path(install_root, entry.path)
+            _mkdir_parents_tracked(
+                live.parent, install_root, created_directories
+            )
+            live = _safe_install_path(install_root, entry.path)
+        except (ManifestError, OSError):
+            _restore_replaced(replaced, created_directories)
+            return UpdateResult(False, False, "unsafe update target"), [], []
+        backup: Path | None = None
+        if live.exists():
+            if not live.is_file() or live.is_symlink():
+                _restore_replaced(replaced, created_directories)
+                return UpdateResult(False, False, "unsafe update target"), [], []
+            backup = temporary_root / "backups" / entry.path
+            backup.parent.mkdir(parents=True, exist_ok=True)
             try:
-                os.remove(fpath)
-                log_emitter(f"【清除】{fname} 格式异常，已删除")
-            except Exception:
+                shutil.copy2(live, backup)
+            except OSError:
+                _restore_replaced(replaced, created_directories)
+                return UpdateResult(False, False, "backup failed"), [], []
+        try:
+            os.replace(staged_path, live)
+        except OSError:
+            restored = _restore_replaced(replaced, created_directories)
+            reason = "replace failed" if restored else "replace and rollback failed"
+            return UpdateResult(False, False, reason), [], []
+        replaced.append((live, backup))
+    return UpdateResult(True, False, "updated"), replaced, created_directories
+
+
+def _remove_exact_legacy_paths(
+    removals: tuple[str, ...], install_root: Path, temporary_root: Path
+) -> tuple[bool, bool]:
+    removed: list[tuple[Path, Path]] = []
+
+    def restore_removed() -> bool:
+        restored = True
+        for live, backup in reversed(removed):
+            try:
+                os.replace(backup, live)
+            except OSError:
+                restored = False
+        return restored
+
+    for relative in removals:
+        if relative not in ALLOWED_REMOVALS:
+            raise ManifestError("removal outside legacy allowlist")
+        target = install_root / relative
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            return False, restore_removed()
+        if not target.exists():
+            continue
+        backup = temporary_root / "removal_backups" / relative
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(target, backup)
+            target.unlink()
+        except OSError:
+            return False, restore_removed()
+        removed.append((target, backup))
+    return True, True
+
+
+def apply_manifest(
+    manifest: UpdateManifest,
+    install_root: Path,
+    fetch_file: Callable[[str], bytes],
+) -> UpdateResult:
+    """Apply a verified manifest transaction without touching private state."""
+    install_root = Path(install_root)
+    try:
+        _validate_manifest_for_apply(manifest)
+        changed = _changed_entries(manifest.files, install_root)
+    except (ManifestError, AttributeError, TypeError):
+        return UpdateResult(False, False, "invalid manifest")
+    if not changed:
+        return UpdateResult(False, False, "up to date")
+
+    install_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=install_root) as temp_name:
+        temporary_root = Path(temp_name)
+        try:
+            staged = _stage_and_verify(changed, temporary_root, fetch_file)
+        except (ManifestError, OSError, TypeError):
+            return UpdateResult(False, False, "staging verification failed")
+        result, replaced_files, created_directories = _replace_with_rollback(
+            staged, install_root, temporary_root
+        )
+        if not result.updated:
+            return result
+        try:
+            removals_ok, removal_rollback_ok = _remove_exact_legacy_paths(
+                manifest.remove, install_root, temporary_root
+            )
+        except (ManifestError, AttributeError, TypeError):
+            removals_ok = False
+            removal_rollback_ok = False
+        if not removals_ok:
+            restored = _restore_replaced(replaced_files, created_directories)
+            reason = (
+                "removal failed"
+                if restored and removal_rollback_ok
+                else "removal and rollback failed"
+            )
+            return UpdateResult(False, False, reason)
+
+    return replace(
+        result,
+        restart_required=any(item.path == "linera_runner.py" for item in changed),
+    )
+
+
+def _read_local_password(config_path: Path) -> str | None:
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("wallet_password")
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def _atomic_write_private_config(target: Path, password: str) -> bool:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            delete=False,
+            dir=target.parent,
+        ) as temporary:
+            json.dump({"wallet_password": password}, temporary, ensure_ascii=False)
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, target)
+        temporary_path = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
                 pass
 
-    # 同步清除 task 模块内存中的数据
-    if task_module:
-        if hasattr(task_module, 'ACCOUNT_TARGET_TRADES'):
-            task_module.ACCOUNT_TARGET_TRADES.clear()
-        if hasattr(task_module, 'TASK_STATUS'):
-            task_module.TASK_STATUS.clear()
 
-
-# ═══════════════════════════════════════════════
-#  任务执行逻辑（asyncio 在独立线程中运行）
-# ═══════════════════════════════════════════════
-
-def run_batch_logic(thread_count, screenshot_mode=False, timelapse_mode=False):
-    global is_task_running, base_module, task_module
-
-    # 每次运行前重新加载，实现"热"更新
-    base_module, task_module = load_core_modules()
-    if not base_module or not task_module:
-        log_emitter("【错误】无法加载核心模块！")
-        is_task_running = False
-        socketio.emit('status_update', {'running': False})
-        return
-
-    base_module.set_logger_callback(log_emitter)
-    base_module.STOP_FLAG = False
-
-    if hasattr(task_module, 'SCREENSHOT_ON_FAILURE'):
-        task_module.SCREENSHOT_ON_FAILURE = screenshot_mode
-        if screenshot_mode:
-            log_emitter("【截图】失败截图模式已开启")
-
-    if hasattr(task_module, 'TIMELAPSE_ENABLED'):
-        task_module.TIMELAPSE_ENABLED = timelapse_mode
-        if timelapse_mode:
-            log_emitter("【录制】定时截图模式已开启（每 3s 截图一次）")
-
-    # 每日清除进度文件（双重保险）
-    _clear_daily_files()
-    if hasattr(task_module, 'reset_daily_data'):
-        task_module.reset_daily_data()
-
-    # 显示版本号
-    tv = getattr(task_module, '__version__', '?')
-    bv = getattr(base_module, '__version__', '?')
-    log_emitter(f"【版本】linera_task: {tv} | base_module: {bv}")
-
-    # 加载账号
-    excel_path = os.path.join(get_base_dir(), "hubshuju.xlsx")
-    log_emitter(f"正在加载账号: {excel_path}")
-    accounts = base_module.load_accounts(excel_path)
-
-    if not accounts:
-        log_emitter("【错误】未找到账号，请检查 hubshuju.xlsx")
-        is_task_running = False
-        socketio.emit('status_update', {'running': False})
-        return
-
-    log_emitter(f"共加载 {len(accounts)} 个账号，并发数: {thread_count}")
-
+def migrate_private_config(install_root: Path) -> bool:
+    """Migrate only the legacy wallet password without importing old code."""
+    if os.environ.get("OKX_WALLET_PASSWORD", "").strip():
+        return True
+    install_root = Path(install_root)
+    config_path = install_root / "Linera2.0" / "local_config.json"
+    if _read_local_password(config_path):
+        return True
+    legacy_path = install_root / "base_module.py"
     try:
-        asyncio.run(base_module.run_batch(
-            accounts,
-            task_module.linera_task,
-            max_workers=thread_count,
-        ))
-    except Exception as e:
-        log_emitter(f"任务执行异常: {e}")
-    finally:
-        is_task_running = False
-        socketio.emit('status_update', {'running': False})
-        log_emitter("所有任务已结束或被停止。")
-
-
-# ═══════════════════════════════════════════════
-#  Flask 路由 + SocketIO 事件
-# ═══════════════════════════════════════════════
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-
-@socketio.on('start_task')
-def handle_start_task(data):
-    global task_thread, is_task_running
-    if is_task_running:
-        emit('new_log', "任务已经在运行中...")
-        return
-
-    try:
-        threads = int(data.get('threads', 1))
-    except (ValueError, TypeError, AttributeError):
-        threads = 1
-
-    screenshot_mode = bool(data.get('screenshot', False))
-    timelapse_mode = bool(data.get('timelapse', False))
-
-    is_task_running = True
-    emit('status_update', {'running': True})
-
-    task_thread = threading.Thread(
-        target=run_batch_logic, args=(threads, screenshot_mode, timelapse_mode), daemon=True,
-    )
-    task_thread.start()
-
-
-@socketio.on('connect')
-def handle_connect():
-    emit('version_info', {
-        'task_local': LAST_TASK_VERSION,
-        'base_local': LAST_BASE_VERSION,
-        'runner_local': LAST_RUNNER_VERSION,
-        'task_remote': LAST_REMOTE_TASK_VERSION,
-        'base_remote': LAST_REMOTE_BASE_VERSION,
-        'runner_remote': LAST_REMOTE_RUNNER_VERSION,
-        'status': LAST_UPDATE_STATUS,
-    })
-
-
-@socketio.on('stop_task')
-def handle_stop_task():
-    global is_task_running
-    if not is_task_running:
-        return
-    emit('new_log', "正在发送停止信号...")
-    if base_module:
-        base_module.stop_all_tasks()
-
-
-@socketio.on('shutdown_server')
-def handle_shutdown_server():
-    emit('new_log', "正在关闭程序...")
-    def kill():
-        time.sleep(1)
-        os._exit(0)
-    threading.Thread(target=kill, daemon=True).start()
-
-
-# ═══════════════════════════════════════════════
-#  任务状态 API + 实时推送
-# ═══════════════════════════════════════════════
-
-@app.route('/api/tasks')
-def api_tasks():
-    if task_module and hasattr(task_module, 'TASK_STATUS'):
-        return jsonify(list(task_module.TASK_STATUS.values()))
-    return jsonify([])
-
-
-def _get_runner_name():
-    """获取本机 Runner 名称：优先环境变量，其次计算机名"""
-    if RUNNER_NAME:
-        return RUNNER_NAME
-    import socket
-    return socket.gethostname()
-
-
-def _task_status_pusher():
-    """后台线程：每 2 秒向前端推送 + 上报到 tasks_manager（含历史数据）"""
-    while True:
-        socketio.sleep(2)
-        if task_module and hasattr(task_module, 'TASK_STATUS') and task_module.TASK_STATUS:
-            data = list(task_module.TASK_STATUS.values())
-            socketio.emit('task_status_update', data)
-
-            if REPORT_URL:
-                try:
-                    payload = json.dumps({
-                        'runner': _get_runner_name(),
-                        'tasks': data,
-                    }).encode('utf-8')
-                    req = urllib.request.Request(
-                        REPORT_URL, data=payload,
-                        headers={'Content-Type': 'application/json'},
-                        method='POST',
-                    )
-                    urllib.request.urlopen(req, timeout=3)
-                except Exception:
-                    pass
-
-
-socketio.start_background_task(_task_status_pusher)
-
-
-# ═══════════════════════════════════════════════
-#  入口
-# ═══════════════════════════════════════════════
-
-if __name__ == '__main__':
-    port = 5001
-    print("=" * 50)
-    print("  Linera Prediction Market 控制台")
-    print(f"  请在浏览器访问: http://127.0.0.1:{port}")
-    print("=" * 50)
-
-    def open_browser():
-        time.sleep(1.5)
-        import webbrowser
-        webbrowser.open(f"http://127.0.0.1:{port}")
-    threading.Thread(target=open_browser, daemon=True).start()
-
-    socketio.run(app, host="0.0.0.0", debug=False, port=port, allow_unsafe_werkzeug=True)
+        legacy_text = legacy_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    match = _LEGACY_PASSWORD_PATTERN.search(legacy_text)
+    if not match:
+        return False
+    return _atomic_write_private_config(config_path, match.group(1))
