@@ -35,3 +35,23 @@ python .\publish.py
 Set-Location .\Linera2.0
 python -m unittest discover -s tests -v
 ```
+
+## 打包版 EXE 的更新
+
+如果另一台电脑使用 `linera_runner.exe`，第一次迁移建议用当前源码重新打包一次：
+
+```powershell
+python -m pip install pyinstaller
+python .\build.py
+```
+
+把 `dist\linera_runner.exe` 复制过去后，只替换旧的 EXE。不要覆盖该电脑本地的
+`hubshuju.xlsx`、`Linera2.0\local_config.json`、`auto_sessions.json` 或状态文件。
+以后启动 EXE 时，它会自动读取 GitHub 清单，更新 `Linera2.0` 运行包并安全重启；
+不需要每次重新打包。若当前仍有交易轮次，先等待轮次结束再重启 EXE，HubStudio
+浏览器窗口可以保持打开。
+
+## 给另一台电脑 Codex 的交接
+
+让 Codex 先阅读本文件和 `Linera2.0\README.md`，再开始操作。它只能修改公开代码，
+不得读取、输出或上传账号表、钱包配置、Cookie、授权头、日志、截图和运行状态。
