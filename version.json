@@ -1,13 +1,13 @@
 {
   "task_version": "",
   "base_version": "",
-  "runner_version": "2026.07.16.1",
+  "runner_version": "2026.07.17.1",
   "schema_version": 2,
-  "app_version": "2026.07.16.1",
+  "app_version": "2026.07.17.1",
   "files": [
     {
       "path": "Linera2.0/README.md",
-      "sha256": "944a6d61735635569d90e7640c712c40b7ae30a01a9bc1d93fc434dabe102f4a"
+      "sha256": "7e3502e2880541fda73c575c0c0c9440d0829b7565816d1943cc703ef3c22d3f"
     },
     {
       "path": "Linera2.0/linera2/__init__.py",
