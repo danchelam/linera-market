@@ -21,6 +21,7 @@ from publish import (  # noqa: E402
     PublishError,
     _verify_remote,
     build_manifest,
+    ensure_clean_index,
     ensure_fast_forward,
     publish,
     runtime_files,
@@ -156,11 +157,37 @@ class PublisherTests(unittest.TestCase):
             ("merge-base", "--is-ancestor", "origin/main", "HEAD"),
         )
 
+    def test_real_publish_aborts_before_mutation_when_private_path_is_pre_staged(self):
+        subprocess.run(["git", "init"], cwd=self.root, check=True, capture_output=True)
+        private_path = write(self.root, "private.env", b"private test value")
+        subprocess.run(
+            ["git", "add", "--", private_path.name],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+
+        with patch("publish._run_tests") as run_tests:
+            with self.assertRaises(PublishError) as caught:
+                publish(self.root, "2026.07.15.1")
+
+        run_tests.assert_not_called()
+        self.assertFalse((self.root / "version.json").exists())
+        self.assertNotIn("private test value", str(caught.exception))
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        self.assertEqual(staged, [private_path.name])
+
     @patch("publish._run_tests")
     @patch("publish.scan_sensitive_files", return_value=[])
     def test_non_fast_forward_does_not_rewrite_manifest(self, _scan, _tests):
         with patch("publish.run_git") as git:
-            git.side_effect = [git_result(), git_result(returncode=1)]
+            git.side_effect = [git_result(), git_result(), git_result(returncode=1)]
             with self.assertRaises(PublishError):
                 publish(self.root, "2026.07.15.1")
 
@@ -197,6 +224,9 @@ class PublisherTests(unittest.TestCase):
         self.assertTrue(result.remote_verified)
         run_tests.assert_called_once_with(self.root)
         commands = [call.args for call in git.call_args_list]
+        self.assertEqual(
+            commands[0], ("diff", "--cached", "--quiet", "--exit-code")
+        )
         self.assertIn(("fetch", "origin", "main"), commands)
         add = next(args for args in commands if args[:2] == ("add", "--"))
         self.assertEqual(add[2:], tuple(result.staged_paths))
@@ -257,9 +287,12 @@ class PublisherTests(unittest.TestCase):
             "Linera2.0/linera2/runtime.py",
             b'OKX_WALLET_PASSWORD = "embedded-value"',
         )
-        with patch("publish.run_git") as git, self.assertRaises(PublishError) as caught:
+        with patch("publish.ensure_clean_index") as preflight, patch(
+            "publish.run_git"
+        ) as git, self.assertRaises(PublishError) as caught:
             publish(self.root, "2026.07.15.1")
 
+        preflight.assert_called_once_with(self.root)
         git.assert_not_called()
         self.assertNotIn("embedded-value", str(caught.exception))
 

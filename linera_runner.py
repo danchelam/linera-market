@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 
-__version__ = "2026.07.16.1"
+__version__ = "2026.07.17.2"
 
 
 ALLOWED_PREFIXES = ("Linera2.0/linera2/", "Linera2.0/templates/")

@@ -191,6 +191,15 @@ def ensure_fast_forward(repo_root: Path, remote_ref: str = "origin/main") -> Non
         raise PublishError(f"{remote_ref} is not an ancestor of HEAD")
 
 
+def ensure_clean_index(repo_root: Path) -> None:
+    """Refuse a real publication when the caller already staged any path."""
+    result = run_git(
+        "diff", "--cached", "--quiet", "--exit-code", check=False, cwd=Path(repo_root)
+    )
+    if result.returncode != 0:
+        raise PublishError("Git index is not clean; publication aborted")
+
+
 def _run_tests(repo_root: Path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "unittest", "discover", "-s", "Linera2.0/tests", "-v"],
@@ -253,6 +262,8 @@ def publish(
     skip_remote_verify: bool = False,
 ) -> PublishResult:
     root = Path(repo_root).absolute()
+    if not dry_run:
+        ensure_clean_index(root)
     release_version = version or _next_version(root)
     manifest = build_manifest(root, release_version)
     selected = runtime_files(root)
