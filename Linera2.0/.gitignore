@@ -3,3 +3,9 @@ __pycache__/
 readiness_status.json
 auto_sessions.json
 screenshots/
+local_config.json
+alerts.json
+*_auto_*.json
+*_readiness_*.json
+*.png
+*.log

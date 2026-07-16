@@ -64,3 +64,23 @@ python -m linera2 --auto-session --integration-target 1 --workers 1
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## 安装与安全更新
+
+从项目根目录运行根级 `linera_runner.py`。它会读取 `version.json`，在安全校验通过后下载新的 Linera2 包；下载或校验失败时继续使用最后一次成功安装的本地包。首次启动会将旧版本可读取的本地密码迁移到 `Linera2.0/local_config.json`，也可以只设置环境变量：
+
+```powershell
+$env:OKX_WALLET_PASSWORD = "your-local-wallet-password"
+python .\linera_runner.py --web --auto-session --workers 1
+```
+
+账号文件 `hubshuju.xlsx` 必须由操作者自行放入项目根目录。密码、Cookie、授权头、状态 JSON、截图和日志都属于本机数据，已被忽略规则排除，不应上传。
+
+维护者发布前使用：
+
+```powershell
+python .\publish.py --dry-run
+python .\publish.py
+```
+
+`--dry-run` 只运行测试并打印固定发布清单。正式发布会生成 schema 2 的 `version.json` 和文件哈希，检查 GitHub 远端后再进行 fast-forward 推送；发布器从不 force-push，也不会把本地账号或钱包数据纳入清单。

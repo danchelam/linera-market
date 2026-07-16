@@ -69,6 +69,19 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn("Linera2.0/auto_sessions.json", names)
         self.assertNotIn("Linera2.0/linera2/nested/ignored.py", names)
 
+    def test_repository_private_artifacts_are_ignored(self):
+        root_ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+        local_ignore = (REPO_ROOT / "Linera2.0" / ".gitignore").read_text(encoding="utf-8")
+        for pattern in (
+            "hubshuju.xlsx",
+            "local_config.json",
+            "*_auto_*.json",
+            "*_readiness_*.json",
+            "*.png",
+            "*.log",
+        ):
+            self.assertIn(pattern, root_ignore + "\n" + local_ignore)
+
     def test_runtime_files_reject_symlinks(self):
         link = self.root / "Linera2.0/linera2/link.py"
         try:
