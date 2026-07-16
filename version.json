@@ -1,5 +1,94 @@
 {
-  "task_version": "2026.06.06.1",
-  "base_version": "2026.06.06.1",
-  "runner_version": "2026.06.06.1"
+  "task_version": "",
+  "base_version": "",
+  "runner_version": "2026.07.16.1",
+  "schema_version": 2,
+  "app_version": "2026.07.16.1",
+  "files": [
+    {
+      "path": "Linera2.0/README.md",
+      "sha256": "944a6d61735635569d90e7640c712c40b7ae30a01a9bc1d93fc434dabe102f4a"
+    },
+    {
+      "path": "Linera2.0/linera2/__init__.py",
+      "sha256": "33e4f1db74171ea459e3ae97116c3870af3997b53f078a8bbdb60e6e15c3d72b"
+    },
+    {
+      "path": "Linera2.0/linera2/__main__.py",
+      "sha256": "0f7d54f3fbb1f79a85eb8110f11793db99da6f3c61ee979de5abe9a1b5f3fdb3"
+    },
+    {
+      "path": "Linera2.0/linera2/account_support.py",
+      "sha256": "0258e29d977313e8ac17259264a45bf7209d595e3819636df9b34b1482541b69"
+    },
+    {
+      "path": "Linera2.0/linera2/auto_page.py",
+      "sha256": "729a58fa9f39e1cdeb6468fe514e7912bc2418fe6ae662d44b5f9b0e0d1f6d3f"
+    },
+    {
+      "path": "Linera2.0/linera2/auto_runtime.py",
+      "sha256": "70f799465fd467dfd0098d331212d8f152d6aa4e2e76397dc73239db88e7ac59"
+    },
+    {
+      "path": "Linera2.0/linera2/auto_session.py",
+      "sha256": "e0b90292688077fe062ca6960563acfe0db7fab18057e519f5c96622fcd6564c"
+    },
+    {
+      "path": "Linera2.0/linera2/auto_tracking.py",
+      "sha256": "7083e74cde2b536e493abbe6570614c9f665dac39fd261a2c09059bca67605ed"
+    },
+    {
+      "path": "Linera2.0/linera2/cli.py",
+      "sha256": "12bef6d8dc45f0216f8f808af8b86768263f940200a4899fe1bc40e521107ab0"
+    },
+    {
+      "path": "Linera2.0/linera2/hubstudio.py",
+      "sha256": "3164f469af074782a51f5c04d7df2ccb5bdc51f0c85edbcddafaf4b76707e207"
+    },
+    {
+      "path": "Linera2.0/linera2/local_config.py",
+      "sha256": "409dd0136f91b71bfed55705266993e7c1538704e4b8298e662d1e53c1f803da"
+    },
+    {
+      "path": "Linera2.0/linera2/readiness.py",
+      "sha256": "804906b27cbf1920b24eec11dc7a4f4974e66e2fd2509c2fa7fcc37bdfde14fa"
+    },
+    {
+      "path": "Linera2.0/linera2/runtime.py",
+      "sha256": "5ca7330fcb74e45ca7998f6faeb2e69ef5dfe446dd4c218648cbf741d6a93a33"
+    },
+    {
+      "path": "Linera2.0/linera2/store.py",
+      "sha256": "f73b09d5e27c11b561e913e1948eb5ef2ec1eefceb0bf4a2a3eefdde3fb447bc"
+    },
+    {
+      "path": "Linera2.0/linera2/wallet_recovery.py",
+      "sha256": "002b1ce8fe1e111ee2920154ee766377781c6fd693463b681b88f6457a084898"
+    },
+    {
+      "path": "Linera2.0/linera2/wallet_support.py",
+      "sha256": "0febfbc7557f05c1c54d7f32d9536eb1e2efbdc92995611c60029a1c5787f40b"
+    },
+    {
+      "path": "Linera2.0/linera2/webapp.py",
+      "sha256": "a6e40e6ca83fd42d5cef9c56a1df0ffdd301c68e57916baf2a8e6202b88c8b01"
+    },
+    {
+      "path": "Linera2.0/requirements.txt",
+      "sha256": "85c1353c622c4484e973588c427db18f8fa89b6923f18352f5f795befba253c7"
+    },
+    {
+      "path": "Linera2.0/templates/index.html",
+      "sha256": "4d44705579522c5c2bd4067cfa60dd075e3d01af85b31bdf9b3f8233c1ad8674"
+    },
+    {
+      "path": "linera_runner.py",
+      "sha256": "e5ac92e35ce31974bbfe7a3d590720175368a28945ab1583833c8f71e9778e1a"
+    }
+  ],
+  "remove": [
+    "linera_task.py",
+    "base_module.py",
+    "test_full_flow.py"
+  ]
 }
